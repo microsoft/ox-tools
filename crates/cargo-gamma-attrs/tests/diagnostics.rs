@@ -100,6 +100,35 @@ fn skip_reports_its_own_name_in_a_malformed_diagnostic() {
 }
 
 #[test]
+fn resource_rejections_reach_the_public_macro_diagnostic() {
+    for (name, source, reason) in [
+        (
+            "resource_non_test",
+            "#[gamma::resource(\"cargo\")]\nfn ordinary() {}",
+            "require a test attribute",
+        ),
+        (
+            "resource_unsupported",
+            "#[gamma::resource(\"cargo\")]\nstruct Ordinary;",
+            "test functions or test modules",
+        ),
+        ("resource_external", "#[gamma::resource(\"cargo\")]\nmod external;", "inline module"),
+        (
+            "resource_malformed",
+            "#[gamma::resource(42)]\n#[test] fn annotated() {}",
+            "one string literal",
+        ),
+        (
+            "resource_nonportable",
+            "#[gamma::resource(\"two words\")]\n#[test] fn annotated() {}",
+            "start with an ASCII letter",
+        ),
+    ] {
+        assert_diagnostic(name, source, &["#[gamma::resource]:", reason]);
+    }
+}
+
+#[test]
 fn expect_survived_reports_its_own_name_in_a_malformed_diagnostic() {
     assert_diagnostic(
         "expect_survived_malformed",

@@ -12,6 +12,7 @@ use super::cli::SuppressArgs;
 use super::dispatch::EXIT_OK;
 use super::host::Host;
 use super::when::When;
+use crate::HashMap;
 use crate::discover::{Plan, RunRecord, TargetFile};
 use crate::elements::Publication;
 use crate::error::error;
@@ -118,16 +119,31 @@ fn eligible_files(record: &RunRecord, eligible: &[crate::fix::Eligible]) -> crat
 }
 
 struct CurrentSources {
-    contents: crate::HashMap<Utf8PathBuf, String>,
-    generated: crate::HashMap<Utf8PathBuf, Vec<Mutant>>,
+    files: HashMap<Utf8PathBuf, CurrentSource>,
     stale: Vec<String>,
+}
+
+struct CurrentSource {
+    contents: String,
+    generated: Vec<Mutant>,
+    index: HashMap<crate::model::MutantId, Vec<usize>>,
+    digest: String,
+    directives: Vec<crate::suppress::Directive>,
+    package: String,
 }
 
 fn current_sources(root: &Utf8Path, record: &RunRecord, affected: &crate::HashMap<Utf8PathBuf, usize>) -> crate::Result<CurrentSources> {
     let outcomes = record.outcomes();
-    let mut contents = crate::HashMap::default();
-    let mut generated = crate::HashMap::default();
+    let mut files = HashMap::default();
     let mut stale = Vec::new();
+    let mut by_file: HashMap<_, (&str, Vec<_>)> = HashMap::default();
+    for outcome in outcomes.iter().filter(|outcome| affected.contains_key(&outcome.file)) {
+        by_file
+            .entry(&outcome.file)
+            .or_insert_with(|| (outcome.package.as_str(), Vec::new()))
+            .1
+            .push(outcome);
+    }
 
     for (file, eligible_count) in affected {
         let path = root.join(file);
@@ -143,53 +159,58 @@ fn current_sources(root: &Utf8Path, record: &RunRecord, affected: &crate::HashMa
             Err(cause) => return Err(error!("could not read `{path}`").caused_by(cause)),
         };
         let parsed = crate::parse::SourceFile::parse(file.clone(), source.clone())?;
+        let (package, outcomes) = by_file.get(file).expect("affected files are selected from this record's outcomes");
         let selectors: Vec<String> = outcomes
             .iter()
-            .filter(|outcome| &outcome.file == file)
             .filter_map(|outcome| outcome.site.as_ref().map(|site| site.mutator.clone()))
             .collect::<BTreeSet<_>>()
             .into_iter()
             .collect();
         let selection = crate::ops::Selection::parse(&selectors.join(","))?;
-        // #[gamma::skip(literal.str_to_xyzzy, reason = "affected is built from outcomes, so every affected file has at least one matching outcome and the package fallback is unreachable")]
-        let package = outcomes
-            .iter()
-            .find(|outcome| &outcome.file == file)
-            .map_or("", |outcome| outcome.package.as_str());
         let candidates = crate::ops::collect_candidates(&parsed, &selection);
         let current = crate::ops::into_mutants(&parsed, package, candidates);
-        let _previous = generated.insert(file.clone(), current);
-        let _previous = contents.insert(file.clone(), source);
+        let mut index: HashMap<_, Vec<_>> = HashMap::default();
+        for (offset, candidate) in current.iter().enumerate() {
+            index.entry(candidate.id.clone()).or_default().push(offset);
+        }
+        let digest = crate::discover::digest(source.as_bytes());
+        let directives = crate::suppress::directives(&parsed)?;
+        let package = if
+        // #[gamma::skip(cond.always_false, tag = "equivalent", reason = "A file without current candidates cannot contribute a suppression; its stored package label is never used to identify or edit a mutant.")]
+        current.is_empty() {
+            String::new()
+        } else {
+            (*package).to_owned()
+        };
+        let _previous = files.insert(
+            file.clone(),
+            CurrentSource {
+                contents: source,
+                generated: current,
+                index,
+                digest,
+                directives,
+                package,
+            },
+        );
     }
 
-    Ok(CurrentSources {
-        contents,
-        generated,
-        stale,
-    })
+    Ok(CurrentSources { files, stale })
 }
 
 fn plan_from_record(root: &Utf8Path, record: &RunRecord, eligible: &[crate::fix::Eligible]) -> crate::Result<(Plan, Vec<String>)> {
     let outcomes = record.outcomes();
     let mut files = Vec::new();
-    let mut digests = crate::HashMap::default();
     let mut mutants = Vec::new();
     let affected = eligible_files(record, eligible)?;
-    let CurrentSources {
-        contents,
-        generated,
-        mut stale,
-    } = current_sources(root, record, &affected)?;
+    let CurrentSources { files: sources, mut stale } = current_sources(root, record, &affected)?;
 
     for outcome in outcomes {
-        // #[gamma::skip(cond.always_false, reason = "contents contains only affected files, so omitting this fast-path still skips unaffected outcomes at contents.get below")]
-        if !affected.contains_key(&outcome.file) {
-            // #[gamma::skip(loop.delete_continue, reason = "an unaffected file has no contents entry, so the subsequent contents.get guard still continues")]
-            continue;
-        }
         let is_eligible = eligible.iter().any(|entry| entry.outcome() == outcome.outcome);
         let Some(site) = outcome.site else { continue };
-        let Some(source) = contents.get(&outcome.file) else { continue };
+        let Some(source) = sources.get(&outcome.file) else {
+            continue;
+        };
 
         let identity = format!(
             "{:032x}",
@@ -206,7 +227,6 @@ fn plan_from_record(root: &Utf8Path, record: &RunRecord, eligible: &[crate::fix:
             continue;
         }
 
-        let current_digest = crate::discover::digest(source.as_bytes());
         let expected = crate::discover::SiteIdentity {
             file: outcome.file.clone(),
             item: site.item.clone(),
@@ -214,17 +234,19 @@ fn plan_from_record(root: &Utf8Path, record: &RunRecord, eligible: &[crate::fix:
             normalized_text: site.digest.clone(),
             occurrence: site.occurrence,
         };
-        let matches: Vec<&Mutant> = generated
-            .get(&outcome.file)
+        let candidates = &source.generated;
+        let matches: Vec<&Mutant> = source
+            .index
+            .get(&outcome.id)
             .into_iter()
             .flatten()
+            .map(|&offset| &candidates[offset])
             .filter(|candidate| {
                 crate::discover::SiteIdentity::from_mutant(candidate) == expected
-                    && candidate.id == outcome.id
                     && candidate.replacement_index == site.replacement_index
                     && candidate.replacement.as_str() == site.replacement
                     && candidate.shape == site.shape
-                    && (current_digest != outcome.file_digest
+                    && (source.digest != outcome.file_digest
                         || (candidate.span.start == site.span_start
                             && candidate.span.end == site.span_end
                             && candidate.original.as_str() == site.original))
@@ -245,21 +267,19 @@ fn plan_from_record(root: &Utf8Path, record: &RunRecord, eligible: &[crate::fix:
     }
 
     let recorded: BTreeSet<_> = mutants.iter().map(|mutant| mutant.id.clone()).collect();
-    // Keep unrecorded candidates pending: partial evidence must not authorize their collateral
-    // suppression merely because a directive shares the recorded candidates' syntactic scope.
-    mutants.extend(generated.into_values().flatten().filter(|mutant| !recorded.contains(&mutant.id)));
-
-    for (path, source) in contents {
-        let package = mutants
-            .iter()
-            .find(|mutant| mutant.file.as_ref() == path)
-            .map_or_else(String::new, |mutant| mutant.package.to_string());
-        let _previous = digests.insert(path.clone(), crate::discover::digest(source.as_bytes()));
+    let mut digests = HashMap::default();
+    let mut directives = HashMap::default();
+    for (path, source) in sources {
+        // Keep unrecorded candidates pending: partial evidence must not authorize their collateral
+        // suppression merely because a directive shares the recorded candidates' syntactic scope.
+        mutants.extend(source.generated.into_iter().filter(|mutant| !recorded.contains(&mutant.id)));
+        let _previous = digests.insert(path.clone(), source.digest);
+        let _previous = directives.insert(path.clone(), source.directives);
         files.push(TargetFile {
             absolute: root.join(&path),
             path,
-            package,
-            source: Some(source),
+            package: source.package,
+            source: Some(source.contents),
         });
     }
     files.sort_by(|left, right| left.path.cmp(&right.path));
@@ -277,7 +297,7 @@ fn plan_from_record(root: &Utf8Path, record: &RunRecord, eligible: &[crate::fix:
         reach: crate::HashMap::default(),
         specs: crate::HashMap::default(),
     };
-    apply_source_policy(&mut plan)?;
+    apply_source_policy(&mut plan, &directives);
 
     Ok((plan, stale))
 }
@@ -296,22 +316,16 @@ fn recorded_mutant(candidate: &Mutant, outcome: Outcome, suppression: Option<Sup
     mutant
 }
 
-fn apply_source_policy(plan: &mut Plan) -> crate::Result<()> {
-    for file in &plan.files {
-        let Some(source) = file.source.as_ref() else { continue };
-        let parsed = crate::parse::SourceFile::parse(file.path.clone(), source.clone())?;
-        let directives = crate::suppress::directives(&parsed)?;
-        let mutants: Vec<&mut Mutant> = plan.mutants.iter_mut().filter(|mutant| mutant.file.as_ref() == file.path).collect();
-
-        for mutant in mutants {
-            if mutant.outcome != Outcome::Ignored {
-                mutant.suppression = None;
-            }
-            let _count = crate::suppress::suppress(core::slice::from_mut(mutant), &directives);
+fn apply_source_policy(plan: &mut Plan, directives: &crate::HashMap<Utf8PathBuf, Vec<crate::suppress::Directive>>) {
+    for mutant in &mut plan.mutants {
+        let Some(directives) = directives.get(mutant.file.as_ref()) else {
+            continue;
+        };
+        if mutant.outcome != Outcome::Ignored {
+            mutant.suppression = None;
         }
+        let _count = crate::suppress::suppress(core::slice::from_mut(mutant), directives);
     }
-
-    Ok(())
 }
 
 /// The mutants the edits were written for, which the verification is then allowed to find suppressed.
@@ -444,8 +458,8 @@ pub(super) fn reject_external_sources(root: &Utf8Path, paths: &[&Utf8Path]) -> c
 /// is refused — and the refusal names the flag, because someone working outside version control
 /// deliberately is entitled to say so once rather than be stopped forever.
 ///
-/// A tree that is not a repository at all, or a host with no git, gets no opinion: demanding
-/// version control from someone who is not using it would be a different command.
+/// A confirmed non-work-tree gets no opinion; an unavailable or failing git requires an explicit
+/// `--allow-dirty` override rather than silently disabling this guard.
 ///
 /// Shared with `unsuppress`, whose edit loop has the same shape and the same hazard.
 pub(super) fn recoverable(root: &Utf8Path, paths: &[&Utf8Path], allow_dirty: bool) -> crate::Result<()> {
@@ -456,7 +470,7 @@ fn recoverable_with(
     root: &Utf8Path,
     paths: &[&Utf8Path],
     allow_dirty: bool,
-    status: impl FnOnce(&Utf8Path, &[&Utf8Path]) -> Option<Vec<String>>,
+    status: impl FnOnce(&Utf8Path, &[&Utf8Path]) -> crate::Result<Option<Vec<String>>>,
 ) -> crate::Result<()> {
     if allow_dirty {
         return Ok(());
@@ -468,7 +482,7 @@ fn recoverable_with(
         return Ok(());
     }
 
-    let Some(dirty) = status(root, paths) else {
+    let Some(dirty) = status(root, paths)? else {
         return Ok(());
     };
 
@@ -489,8 +503,8 @@ fn recoverable_with(
 ///
 /// Asked of git rather than derived from the index directly, for the reason the copy path already
 /// asks it: a worktree, a submodule and an index format newer than any library understands all
-/// answer correctly, and a directory that is not a repository answers by failing.
-fn uncommitted(root: &Utf8Path, paths: &[&Utf8Path]) -> Option<Vec<String>> {
+/// answer correctly. Only git's explicit non-work-tree diagnostics bypass the guard.
+fn uncommitted(root: &Utf8Path, paths: &[&Utf8Path]) -> crate::Result<Option<Vec<String>>> {
     uncommitted_with(root, paths, Command::output)
 }
 
@@ -498,7 +512,7 @@ fn uncommitted_with(
     root: &Utf8Path,
     paths: &[&Utf8Path],
     run: impl FnOnce(&mut Command) -> std::io::Result<std::process::Output>,
-) -> Option<Vec<String>> {
+) -> crate::Result<Option<Vec<String>>> {
     let mut command = Command::new("git");
     command
         .arg("-C")
@@ -506,14 +520,30 @@ fn uncommitted_with(
         .args(["status", "--porcelain", "-z", "--no-renames", "--"])
         .args(paths.iter().map(|path| path.as_std_path()))
         .stdin(Stdio::null())
-        .stderr(Stdio::null());
-    let output = run(&mut command).ok()?;
+        // Failed status stderr must stay in English for the narrow first-line nonrepository check.
+        .env("LC_ALL", "C");
+    let output = run(&mut command).map_err(|cause| {
+        error!("could not ask git whether source edits are recoverable; fix git or pass `--allow-dirty`").caused_by(cause)
+    })?;
 
     if !output.status.success() {
-        return None;
+        let diagnostic = String::from_utf8_lossy(&output.stderr);
+        if diagnostic.lines().next().is_some_and(|line| {
+            matches!(
+                line,
+                "fatal: not a git repository (or any of the parent directories): .git" | "fatal: this operation must be run in a work tree"
+            ) || (line.starts_with("fatal: not a git repository (or any parent up to mount point ") && line.ends_with(')'))
+        }) {
+            return Ok(None);
+        }
+        return Err(error!(
+            "git status failed ({}): {}; fix git or pass `--allow-dirty` to edit anyway",
+            output.status,
+            crate::report::encode_controls(diagnostic.trim())
+        ));
     }
 
-    Some(
+    Ok(Some(
         output
             .stdout
             .split(|byte| *byte == 0)
@@ -522,7 +552,7 @@ fn uncommitted_with(
             // Each entry is two status characters, a space, and the path they are about.
             .map(|entry| entry.get(3..).unwrap_or(entry).to_owned())
             .collect(),
-    )
+    ))
 }
 
 /// Rewrites each file the plan has an edit for, recording what it held before in `written`.
@@ -737,20 +767,6 @@ fn verify_record_or_revert<H: Host>(
     finish_verification(host, before, applied.directives, applied.written, styler, verified)
 }
 
-#[cfg(test)]
-fn verify_or_revert<H: Host>(
-    host: &mut H,
-    _args: &SuppressArgs,
-    before: &Plan,
-    intended: &BTreeSet<String>,
-    directives: usize,
-    written: Written,
-    styler: Styler,
-) -> crate::Result<i32> {
-    let verified = Ok(crate::fix::verify(&before.mutants, &before.mutants, intended));
-    finish_verification(host, before, directives, written, styler, verified)
-}
-
 fn finish_verification<H: Host>(
     host: &mut H,
     before: &Plan,
@@ -876,7 +892,6 @@ mod tests {
     use serde_json::{Value, from_value, json, to_value};
 
     use super::*;
-    use crate::HashMap;
     #[cfg(unix)]
     use crate::testing::workdir;
     use crate::testing::{Sink, fails_at_every_line};
@@ -995,7 +1010,7 @@ mod tests {
             let affected = eligible_files(&record, &[crate::fix::Eligible::Timeout]).expect("identities are persisted");
             let unsorted = current_sources(&root, &record, &affected).expect("sources can be read");
             assert_ne!(
-                unsorted.contents.keys().map(|path| path.as_str()).collect::<Vec<_>>(),
+                unsorted.files.keys().map(|path| path.as_str()).collect::<Vec<_>>(),
                 names,
                 "the fixture must not accidentally inherit lexicographic HashMap iteration"
             );
@@ -1242,14 +1257,6 @@ mod tests {
     fn clean_verification_reports_what_was_suppressed() {
         let dir = crate_dir("suppress-verify-");
         let root = Utf8PathBuf::from_path_buf(dir.path().to_path_buf()).expect("utf8");
-        let args = SuppressArgs {
-            dir: root.clone(),
-            cache_dir: None,
-            apply: true,
-            dry_run_suppress: false,
-            allow_dirty: false,
-            eligible: "timeout".to_owned(),
-        };
         let before = Plan {
             skipped: Vec::new(),
             digests: HashMap::default(),
@@ -1270,7 +1277,19 @@ mod tests {
         };
         let mut host = Sink::default();
 
-        let code = verify_or_revert(&mut host, &args, &before, &BTreeSet::new(), 0, Vec::new(), Styler::new(false)).expect("verify");
+        let code = verify_record_or_revert(
+            &mut host,
+            &record_for(&root, &[]),
+            &[crate::fix::Eligible::Timeout],
+            &before,
+            &BTreeSet::new(),
+            Applied {
+                directives: 0,
+                written: Vec::new(),
+            },
+            Styler::new(false),
+        )
+        .expect("verify");
         let err = String::from_utf8(host.err).expect("utf-8");
 
         assert_eq!(code, EXIT_OK);
@@ -1287,22 +1306,30 @@ mod tests {
 
         fs::create_dir_all(config.parent().expect("configuration parent")).expect("configuration parent");
         fs::write(&config, "cargo-args = [\"--cfg\", \"recorded_configuration\"]\n").expect("configuration");
-        let args = dry_args(&root, "timeout");
+        let mutant = recorded_mutant(&root, "", Outcome::Timeout);
+        let intended = BTreeSet::from([mutant.id.to_string()]);
+        let record = record_for(&root, &[mutant]);
+        let eligible = [crate::fix::Eligible::Timeout];
+        let (before, _) = plan_from_record(&root, &record, &eligible).expect("planning precedes the later configuration");
+        let source = fs::read_to_string(root.join("src/lib.rs")).unwrap();
+        fs::write(root.join("src/lib.rs"), format!("// #[gamma::skip(literal.int_to_zero)]\n{source}")).unwrap();
 
-        // This is the interval between argument merging and verification after a suppression
-        // edit. Discovery must use the already merged cargo options rather than re-read this
-        // unrelated generation, which is malformed and would previously be swallowed as defaults.
+        // Verification reconstructs the recorded population rather than re-reading workspace
+        // configuration from a later generation.
         fs::write(&config, "cargo-args = [\n").expect("broken later configuration");
 
         let mut host = Sink::default();
 
-        let code = verify_or_revert(
+        let code = verify_record_or_revert(
             &mut host,
-            &args,
-            &plan_over(&root, &["src/lib.rs"]),
-            &BTreeSet::new(),
-            0,
-            Vec::new(),
+            &record,
+            &eligible,
+            &before,
+            &intended,
+            Applied {
+                directives: 1,
+                written: Vec::new(),
+            },
             Styler::new(false),
         )
         .expect("verification uses its resolved configuration generation");
@@ -1406,17 +1433,20 @@ mod tests {
         let intended: BTreeSet<String> = core::iter::once("never-generated".to_owned()).collect();
         let mut host = Sink::default();
 
-        let error = verify_or_revert(
+        let error = verify_record_or_revert(
             &mut host,
-            &dry_args(&root, "timeout"),
+            &record_for(&root, &[]),
+            &[crate::fix::Eligible::Timeout],
             &before,
             &intended,
-            1,
-            vec![WrittenFile::new(
-                path.clone(),
-                original.clone(),
-                "pub fn answer() -> i32 { 0 }\n".to_owned(),
-            )],
+            Applied {
+                directives: 1,
+                written: vec![WrittenFile::new(
+                    path.clone(),
+                    original.clone(),
+                    "pub fn answer() -> i32 { 0 }\n".to_owned(),
+                )],
+            },
             Styler::new(false),
         )
         .expect_err("verification should fail");
@@ -1445,13 +1475,16 @@ mod tests {
         };
 
         fails_at_every_line(2, |host| {
-            verify_or_revert(
+            verify_record_or_revert(
                 host,
-                &dry_args(&root, "timeout"),
+                &record_for(&root, &[]),
+                &[crate::fix::Eligible::Timeout],
                 &before,
                 &BTreeSet::new(),
-                0,
-                Vec::new(),
+                Applied {
+                    directives: 0,
+                    written: Vec::new(),
+                },
                 Styler::new(false),
             )
             .map(|_| ())
@@ -2239,13 +2272,16 @@ mod tests {
         let mut host = Sink::default();
         let before = plan_over(&root, &["src/lib.rs"]);
 
-        let code = verify_or_revert(
+        let code = verify_record_or_revert(
             &mut host,
-            &dry_args(&root, "timeout"),
+            &record_for(&root, &[]),
+            &[crate::fix::Eligible::Timeout],
             &before,
             &["a".to_owned(), "b".to_owned(), "c".to_owned()].into_iter().collect(),
-            1,
-            Vec::new(),
+            Applied {
+                directives: 1,
+                written: Vec::new(),
+            },
             Styler::new(false),
         );
 
@@ -2254,13 +2290,16 @@ mod tests {
         let _ = code.expect_err("an unsatisfiable intended set");
 
         let mut host = Sink::default();
-        let code = verify_or_revert(
+        let code = verify_record_or_revert(
             &mut host,
-            &dry_args(&root, "timeout"),
+            &record_for(&root, &[]),
+            &[crate::fix::Eligible::Timeout],
             &before,
             &BTreeSet::new(),
-            1,
-            Vec::new(),
+            Applied {
+                directives: 1,
+                written: Vec::new(),
+            },
             Styler::new(false),
         )
         .expect("verify");
@@ -2384,7 +2423,9 @@ mod tests {
         ));
         assert!(git(&root, &["mv", "src/lib.rs", "src/renamed.rs"]));
 
-        let dirty = uncommitted(&root, &[Utf8Path::new("src/renamed.rs")]).expect("the fixture is a repository");
+        let dirty = uncommitted(&root, &[Utf8Path::new("src/renamed.rs")])
+            .expect("git status succeeds")
+            .expect("the fixture is a repository");
 
         assert_eq!(dirty, ["src/renamed.rs"]);
     }
@@ -2450,6 +2491,33 @@ mod tests {
         })
         .expect("explicit fixture toolchain supplies a context");
         RunRecord::from_run(root, mutants, &context, &[root.join("src")])
+    }
+
+    #[test]
+    fn reconstructed_plans_keep_the_source_snapshot_and_continue_past_files_without_directives() {
+        let (_directory, root) = crate::fixtures::crate_dir("suppress-policy-continuation-", "pub fn answer() -> i32 { 42 }\n");
+        let marked = "#[gamma::skip(literal.int_to_zero, reason = \"fixture policy\")]\npub fn marked() -> i32 { 77 }\n";
+        fs::write(root.join("src/z.rs"), marked).unwrap();
+        let mut mutants = collected_mutants_in(&root, "src/lib.rs", "literal.int_to_zero");
+        mutants.extend(collected_mutants_in(&root, "src/z.rs", "literal.int_to_zero"));
+        for mutant in &mut mutants {
+            mutant.outcome = Outcome::Timeout;
+        }
+        let record = record_for(&root, &mutants);
+        let (mut plan, stale) = plan_from_record(&root, &record, &[crate::fix::Eligible::Timeout]).unwrap();
+        assert_eq!(stale, [] as [String; 0]);
+        assert_eq!(plan.files[1].source.as_deref(), Some(marked));
+        for mutant in &mut plan.mutants {
+            mutant.outcome = Outcome::Survived;
+            mutant.suppression = None;
+        }
+        plan.mutants.sort_by(|left, right| left.file.cmp(&right.file));
+        let parsed = crate::parse::SourceFile::parse("src/z.rs", marked.into()).unwrap();
+        let directives = HashMap::from_iter([(Utf8PathBuf::from("src/z.rs"), crate::suppress::directives(&parsed).unwrap())]);
+        apply_source_policy(&mut plan, &directives);
+        assert_eq!(plan.mutants[0].outcome, Outcome::Survived);
+        assert_eq!(plan.mutants[1].outcome, Outcome::Ignored);
+        assert!(plan.mutants[1].suppression.is_some());
     }
 
     fn change_first_entry(record: &RunRecord, change: impl FnOnce(&mut Value)) -> RunRecord {
@@ -2645,9 +2713,10 @@ mod tests {
         let record = record_for(&root, &mutants);
         let affected = eligible_files(&record, &[crate::fix::Eligible::Timeout]).expect("eligible sources");
         let current = current_sources(&root, &record, &affected).expect("two selector families parsed separately");
-        assert_eq!(current.generated[Utf8Path::new("src/lib.rs")].len(), mutants.len());
+        assert_eq!(current.files[Utf8Path::new("src/lib.rs")].generated.len(), mutants.len());
         assert!(
-            current.generated[Utf8Path::new("src/lib.rs")]
+            current.files[Utf8Path::new("src/lib.rs")]
+                .generated
                 .iter()
                 .all(|mutant| mutant.package.as_ref() == "subject")
         );
@@ -2662,8 +2731,7 @@ mod tests {
         }
         fs::remove_file(root.join("src/lib.rs")).expect("remove invalid source");
         let current = current_sources(&root, &record, &affected).expect("missing source is stale");
-        assert!(current.contents.is_empty());
-        assert!(current.generated.is_empty());
+        assert!(current.files.is_empty());
         assert_eq!(current.stale.len(), 1);
         assert!(current.stale[0].contains(&format!("{} eligible outcomes", mutants.len())));
         fs::write(
@@ -2810,7 +2878,10 @@ mod tests {
             };
             mutant.suppression = Some(recorded.clone());
             plan.mutants = vec![mutant];
-            apply_source_policy(&mut plan).expect("current policy");
+            apply_source_policy(
+                &mut plan,
+                &crate::HashMap::from_iter([(Utf8PathBuf::from("src/lib.rs"), Vec::new())]),
+            );
             assert_eq!(plan.mutants[0].outcome, outcome);
             assert_eq!(plan.mutants[0].suppression, (outcome == Outcome::Ignored).then_some(recorded));
         }
@@ -2819,19 +2890,17 @@ mod tests {
         let mut plan = plan_over(&root, &["src/absent.rs", "src/lib.rs"]);
         plan.files[1].source = Some(source.to_owned());
         plan.mutants = vec![recorded_mutant(&root, "", Outcome::Timeout)];
-        apply_source_policy(&mut plan).expect("current directive overrides recorded state");
+        let parsed = crate::parse::SourceFile::parse("src/lib.rs", source.to_owned()).unwrap();
+        let directives = crate::suppress::directives(&parsed).unwrap();
+        apply_source_policy(
+            &mut plan,
+            &crate::HashMap::from_iter([(Utf8PathBuf::from("src/lib.rs"), directives)]),
+        );
         assert_eq!(plan.mutants[0].outcome, Outcome::Ignored);
         assert_eq!(
             plan.mutants[0].suppression.as_ref().and_then(|policy| policy.reason.as_deref()),
             Some("current policy")
         );
-        for invalid in [
-            "pub fn broken( {",
-            "// #[gamma::skip(not.a_mutator)]\npub fn answer() -> i32 { 42 }\n",
-        ] {
-            plan.files[1].source = Some(invalid.to_owned());
-            assert!(apply_source_policy(&mut plan).is_err());
-        }
     }
 
     struct DiagnosticFailure(crate::testing::FlakyHost);
@@ -2994,30 +3063,107 @@ mod tests {
                 stderr: Vec::new(),
             })
         });
-        assert_eq!(result, Some(vec!["src/a.rs".to_owned(), "src/b.rs".to_owned(), "xy".to_owned()]));
         assert_eq!(
-            uncommitted_with(root, &paths, |_| Err(std::io::Error::from(std::io::ErrorKind::NotFound))),
-            None
+            result.unwrap(),
+            Some(vec!["src/a.rs".to_owned(), "src/b.rs".to_owned(), "xy".to_owned()])
         );
+        let failure = uncommitted_with(root, &paths, |_| Err(std::io::Error::from(std::io::ErrorKind::NotFound))).unwrap_err();
+        assert!(failure.to_string().contains("could not ask git"));
+        assert!(failure.to_string().contains("--allow-dirty"));
         #[cfg(windows)]
         let failed = {
             use std::os::windows::process::ExitStatusExt as _;
-            std::process::ExitStatus::from_raw(1)
+            std::process::ExitStatus::from_raw(128)
         };
         #[cfg(unix)]
         let failed = {
             use std::os::unix::process::ExitStatusExt as _;
-            std::process::ExitStatus::from_raw(1 << 8)
+            std::process::ExitStatus::from_raw(128 << 8)
         };
         #[cfg(any(windows, unix))]
-        assert_eq!(
-            uncommitted_with(root, &paths, |_| Ok(std::process::Output {
-                status: failed,
-                stdout: b" M src/a.rs\0".to_vec(),
-                stderr: Vec::new()
-            })),
-            None
-        );
+        {
+            let result = uncommitted_with(root, &paths, |command| {
+                let english = command
+                    .get_envs()
+                    .any(|(name, value)| name == "LC_ALL" && value == Some(std::ffi::OsStr::new("C")));
+                Ok(std::process::Output {
+                    status: failed,
+                    stdout: Vec::new(),
+                    stderr: if english {
+                        b"fatal: not a git repository (or any of the parent directories): .git".to_vec()
+                    } else {
+                        b"fatal: kein Git-Repository".to_vec()
+                    },
+                })
+            });
+            assert_eq!(result.unwrap(), None);
+            let failure = recoverable_with(root, &paths, false, |root, paths| {
+                uncommitted_with(root, paths, |_| {
+                    Ok(std::process::Output {
+                        status: failed,
+                        stdout: b" M src/a.rs\0".to_vec(),
+                        stderr: b"fatal: detected dubious ownership in repository".to_vec(),
+                    })
+                })
+            })
+            .unwrap_err();
+            assert!(failure.to_string().contains("git status failed"));
+            assert!(failure.to_string().contains("dubious ownership"));
+            assert!(failure.to_string().contains("--allow-dirty"));
+            for diagnostic in [
+                "fatal: not a git repository (or any of the parent directories): .git\n",
+                "fatal: this operation must be run in a work tree\n",
+                "fatal: not a git repository (or any parent up to mount point /)\nStopping at filesystem boundary (GIT_DISCOVERY_ACROSS_FILESYSTEM not set).\n",
+                "fatal: not a git repository (or any parent up to mount point /mnt/vss/_work/_temp)\nStopping at filesystem boundary (GIT_DISCOVERY_ACROSS_FILESYSTEM not set).\n",
+            ] {
+                assert!(
+                    uncommitted_with(root, &paths, |_| Ok(std::process::Output {
+                        status: failed,
+                        stdout: Vec::new(),
+                        stderr: diagnostic.as_bytes().to_vec(),
+                    }))
+                    .unwrap()
+                    .is_none()
+                );
+            }
+        }
+    }
+
+    #[test]
+    #[cfg(any(windows, unix))]
+    fn git_status_adapter_rejects_unrelated_or_incomplete_no_repository_diagnostics() {
+        let root = Utf8Path::new("workspace");
+        let paths = [Utf8Path::new("src/a.rs")];
+        #[cfg(windows)]
+        let failed = {
+            use std::os::windows::process::ExitStatusExt as _;
+            std::process::ExitStatus::from_raw(128)
+        };
+        #[cfg(unix)]
+        let failed = {
+            use std::os::unix::process::ExitStatusExt as _;
+            std::process::ExitStatus::from_raw(128 << 8)
+        };
+        for diagnostic in [
+            "fatal: detected dubious ownership in repository (unsafe)\n",
+            "fatal: not a git repository (or any parent up to mount point /\n",
+        ] {
+            let failure = uncommitted_with(root, &paths, |_| {
+                Ok(std::process::Output {
+                    status: failed,
+                    stdout: Vec::new(),
+                    stderr: diagnostic.as_bytes().to_vec(),
+                })
+            })
+            .unwrap_err();
+            assert_eq!(
+                failure.message(),
+                format!(
+                    "git status failed ({failed}): {}; fix git or pass `--allow-dirty` to edit anyway",
+                    diagnostic.trim()
+                )
+            );
+        }
     }
 
     #[test]
@@ -3044,7 +3190,7 @@ mod tests {
             let result = recoverable_with(&root, &paths, false, |observed_root, observed_paths| {
                 assert_eq!(observed_root, root);
                 assert_eq!(observed_paths, paths);
-                dirty.clone()
+                Ok(dirty.clone())
             });
             if expected == 0 {
                 result.expect("unknown or clean status does not refuse");

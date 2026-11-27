@@ -31,11 +31,6 @@ const GITHUB_ACTIONS: &str = "GITHUB_ACTIONS";
 #[cfg_attr(coverage_nightly, coverage(off))]
 pub mod recovery_test_util;
 
-#[cfg(test)]
-fn missing_hints(mode: exec::IncrementalMode, root: &Utf8Path) -> bool {
-    mode.is_enabled() && crate::discover::Hints::is_missing(root)
-}
-
 /// Which of the bulk outcome listings the caller asked for.
 const fn listings(args: &RunArgs, announced: bool, promotable: Option<bool>, suppressible: Option<bool>) -> Listings {
     Listings {
@@ -390,10 +385,10 @@ fn broken_expectations(mutants: &[Mutant]) -> Vec<(&Mutant, &'static str)> {
     broken
 }
 
-/// Fails a run whose gate never got a population to judge.
+/// Fails a nonempty run whose gate never got a population to judge.
 ///
-/// Empty diff selections succeed before reaching this check. Other empty or entirely
-/// ungradeable populations cannot establish a requested score or flaky gate.
+/// Empty selections succeed before reaching this check. Entirely ungradeable nonempty
+/// populations cannot establish a requested score or flaky gate.
 #[cfg_attr(coverage_nightly, coverage(off))]
 fn ungraded<H: Host>(host: &mut H, args: &RunArgs, styler: Styler, flaky_outcomes: bool, expectations: bool) -> i32 {
     let score_unevaluated = args.min_score.is_some();
@@ -463,15 +458,10 @@ fn finish_run<H: Host>(host: &mut H, args: &RunArgs, styler: Styler, executed: E
         return EXIT_CANNOT_PROCEED;
     }
 
-    let Some(plan) = plan else {
-        if args.select.in_diff.is_some() {
-            return
-            // #[gamma::skip(return_value.default, reason = "EXIT_OK and i32::default() are both zero; replacing only this empty-diff success return cannot change its exit status or side effects.", tag = "equivalent")]
-            EXIT_OK;
-        }
-        // Nothing was generated at all, so no mutant carries an expectation either: whether a gate
-        // exists is entirely what the command line asked for.
-        return ungraded(host, args, styler, false, false);
+    let Some(plan) = plan.filter(|plan| !plan.mutants.is_empty()) else {
+        return
+        // #[gamma::skip(return_value.default, reason = "EXIT_OK and i32::default() are both zero; replacing only this empty-selection success return cannot change its exit status or side effects.", tag = "equivalent")]
+        EXIT_OK;
     };
 
     let summary = crate::model::Summary::of(&plan.mutants);
@@ -656,42 +646,6 @@ fn adopted_from_cache(plan: &Plan, cached: &crate::HashMap<crate::model::MutantI
 ///
 /// Said out loud rather than left implicit, because this is on by default and it changes how long a
 /// run takes. A user comparing two runs' timings deserves to know which of them started warm.
-/// Names the skip directives that suppressed nothing this run, so they can be reconsidered.
-///
-/// A skip directive is a standing claim that something there cannot be tested. Once the code under
-/// it changes, the claim keeps applying to nothing, and nothing in the report says so — which makes
-/// a stale directive indistinguishable from a live one, and leaves the next reader believing a
-/// decision that no longer holds. Reporting it is what lets that claim be audited.
-///
-/// Each is named with its file, line, selectors and stated reason. It is a note rather than a
-/// failure, because a directive can legitimately be idle for a run — a mutant whose site the
-/// diff or the shard excluded is not there to be suppressed — and the run's verdict must not turn
-/// on how the population happened to be narrowed.
-///
-/// See [`crate::suppress::idle`] for exactly which directives reach here.
-#[cfg(test)]
-#[cfg_attr(coverage_nightly, coverage(off))]
-fn report_idle<H: Host>(host: &mut H, plan: &Plan, styler: Styler) -> crate::Result<()> {
-    if plan.idle.is_empty() {
-        return Ok(());
-    }
-
-    writeln!(
-        host.error(),
-        "{} {} suppressed nothing and may no longer be needed",
-        styler.verb("Unused"),
-        quantity(plan.idle.len(), "skip directive")
-    )?;
-
-    for idle in &plan.idle {
-        let reason = idle.reason.as_ref().map_or_else(String::new, |reason| format!(" — {reason}"));
-
-        writeln!(host.error(), "  {}:{}: skip({}){reason}", idle.file, idle.line, idle.selectors)?;
-    }
-
-    Ok(())
-}
-
 // #[gamma::skip(all, reason = "diagnostic emission is asserted through an injected Host, while write-failure paths are intentionally best-effort and cannot add a distinct correctness verdict")]
 #[cfg_attr(coverage_nightly, coverage(off))]
 fn report_cache<H: Host>(host: &mut H, adopted: usize, styler: Styler) -> crate::Result<()> {
@@ -2969,7 +2923,7 @@ mod tests {
     }
 
     #[test]
-    fn empty_diff_selections_succeed_with_any_gate_combination() {
+    fn empty_selections_succeed_with_any_gate_combination() {
         for in_diff in [false, true] {
             for min_score in [None, Some(100.0)] {
                 for max_flaky in [None, Some(0)] {
@@ -2979,54 +2933,41 @@ mod tests {
                         ..RunArgs::default()
                     };
                     args.select.in_diff = in_diff.then(|| "changes.patch".into());
-                    let mut host = Sink::default();
-                    let code = finish_run(
-                        &mut host,
-                        &args,
-                        Styler::new(false),
-                        Executed {
-                            plan: None,
-                            stuck: Vec::new(),
-                        },
-                    );
-                    let succeeds = in_diff || (min_score.is_none() && max_flaky.is_none());
-                    assert_eq!(code, if succeeds { EXIT_OK } else { EXIT_GATE_FAILED });
-                    let gate = match (in_diff, min_score, max_flaky) {
-                        (false, Some(_), Some(_)) => Some("the `--min-score` and `--max-flaky` gates"),
-                        (false, Some(_), None) => Some("the `--min-score` gate"),
-                        (false, None, Some(_)) => Some("the `--max-flaky` gate"),
-                        _ => None,
-                    };
-                    assert_eq!(host.err(), gate.map_or_else(String::new, |gate| format!(
-                        "error: no mutant counted toward {gate}, so it was never evaluated; check that the selection — `--in-diff`, `--exclude-file`, `--re`, `--shard-count`/`--shard-index`, `--incremental` — leaves something to test\n"
-                    )));
-                    assert_eq!(host.out(), "");
+                    for plan in [None, Some(fixtures::plan(Vec::new()))] {
+                        let mut host = Sink::default();
+                        let code = finish_run(&mut host, &args, Styler::new(false), Executed { plan, stuck: Vec::new() });
+                        assert_eq!(code, EXIT_OK, "{}", host.err());
+                        assert_eq!(host.err(), "");
+                        assert_eq!(host.out(), "");
+                    }
                 }
             }
         }
     }
 
     #[test]
-    fn empty_diff_selections_do_not_hide_build_failures() {
-        let mut args = RunArgs {
-            min_score: Some(100.0),
-            max_flaky: Some(0),
-            ..RunArgs::default()
-        };
-        args.select.in_diff = Some("changes.patch".into());
-        let mut host = Sink::default();
-        assert_eq!(
-            finish_run(
-                &mut host,
-                &args,
-                Styler::new(false),
-                Executed {
-                    plan: None,
-                    stuck: vec!["instrumented build failed".into()],
-                },
-            ),
-            EXIT_CANNOT_PROCEED
-        );
+    fn empty_selections_do_not_hide_build_failures() {
+        for in_diff in [false, true] {
+            let mut args = RunArgs {
+                min_score: Some(100.0),
+                max_flaky: Some(0),
+                ..RunArgs::default()
+            };
+            args.select.in_diff = in_diff.then(|| "changes.patch".into());
+            let mut host = Sink::default();
+            assert_eq!(
+                finish_run(
+                    &mut host,
+                    &args,
+                    Styler::new(false),
+                    Executed {
+                        plan: None,
+                        stuck: vec!["instrumented build failed".into()],
+                    },
+                ),
+                EXIT_CANNOT_PROCEED
+            );
+        }
     }
 
     #[test]
@@ -4245,7 +4186,7 @@ mod tests {
     }
 
     #[test]
-    fn an_empty_name_filter_is_named_in_the_unevaluated_gate_hint() {
+    fn ungraded_gate_diagnostics_identify_name_filters() {
         let args = RunArgs {
             // Any valid threshold enables the gate; its value is illustrative.
             min_score: Some(80.0),
@@ -4257,15 +4198,6 @@ mod tests {
 
         assert_eq!(code, EXIT_GATE_FAILED);
         assert!(host.err().contains("`--re`"), "{}", host.err());
-    }
-
-    #[test]
-    fn disabled_incremental_mode_suppresses_missing_hints_advice() {
-        let dir = workdir("run-missing-hints-");
-        let root = Utf8Path::from_path(dir.path()).expect("UTF-8 work directory");
-
-        assert!(missing_hints(exec::IncrementalMode::Build, root));
-        assert!(!missing_hints(exec::IncrementalMode::No, root));
     }
 
     #[test]
@@ -5543,70 +5475,6 @@ mod tests {
         }
     }
 
-    /// A directive that suppressed nothing must be named with enough to go and find it: the file,
-    /// the line, what it claimed, and why it said it was needed.
-    #[test]
-    fn an_unused_skip_directive_is_named_with_its_place_and_its_reason() {
-        let mut plan = plan();
-
-        plan.idle = vec![crate::suppress::Idle {
-            file: Utf8PathBuf::from("src/lib.rs"),
-            line: 42,
-            selectors: "arith".to_owned(),
-            reason: Some("the compiler folds it".to_owned()),
-        }];
-
-        let mut host = Sink::default();
-
-        report_idle(&mut host, &plan, Styler::new(false)).expect("note");
-
-        let text = host.err();
-
-        assert!(text.contains("1 skip directive"), "{text}");
-        assert!(text.contains("src/lib.rs:42"), "{text}");
-        assert!(text.contains("skip(arith)"), "{text}");
-        assert!(text.contains("the compiler folds it"), "{text}");
-    }
-
-    /// The quiet case, and the one that makes the loud case worth trusting.
-    #[test]
-    fn a_run_whose_skips_all_still_apply_says_nothing_about_them() {
-        let plan = plan();
-        let mut host = Sink::default();
-
-        report_idle(&mut host, &plan, Styler::new(false)).expect("note");
-
-        assert!(host.err().is_empty(), "{}", host.err());
-    }
-
-    /// Every idle directive is named, not just the first: a tree that has drifted has drifted in
-    /// several places, and a report that stops after one leaves the rest looking deliberate.
-    #[test]
-    fn every_unused_skip_directive_is_named() {
-        let mut plan = plan();
-
-        plan.idle = (1..=3)
-            .map(|line| crate::suppress::Idle {
-                file: Utf8PathBuf::from(format!("src/m{line}.rs")),
-                line,
-                selectors: "arith".to_owned(),
-                reason: None,
-            })
-            .collect();
-
-        let mut host = Sink::default();
-
-        report_idle(&mut host, &plan, Styler::new(false)).expect("note");
-
-        let text = host.err();
-
-        assert!(text.contains("3 skip directives"), "{text}");
-
-        for line in 1..=3 {
-            assert!(text.contains(&format!("src/m{line}.rs:{line}")), "{text}");
-        }
-    }
-
     /// The build discovery is given is the build the run will actually perform.
     ///
     /// `measured` resolves the run configuration once and hands `config.cargo` to both
@@ -5796,7 +5664,7 @@ mod tests {
 
         let code = run_session(&mut host, &args, When::Never, Styler::new(false)).expect("run session");
 
-        assert_eq!(code, EXIT_GATE_FAILED);
+        assert_eq!(code, EXIT_GATE_FAILED, "stdout:\n{}\nstderr:\n{}", host.out(), host.err());
         assert!(host.err().contains("expected survived, but this mutant was"), "{}", host.err());
         assert!(host.err().contains("1 expectation did not hold"), "{}", host.err());
     }
@@ -5879,7 +5747,7 @@ mod tests {
 
         let code = run_session(&mut host, &args, When::Never, Styler::new(false)).expect("run session");
 
-        assert_eq!(code, EXIT_GATE_FAILED);
+        assert_eq!(code, EXIT_GATE_FAILED, "stdout:\n{}\nstderr:\n{}", host.out(), host.err());
         assert!(host.err().contains("is below the required 100.0%"), "{}", host.err());
     }
 
@@ -5996,62 +5864,35 @@ mod tests {
         assert!(error.to_string().contains("could not create artifact directory"), "{error}");
     }
 
-    /// A gate that cannot fail is worse than no gate. A selection that leaves nothing to test used
-    /// to exit zero, so `--min-score 100` passed on the strength of having tested nothing.
     #[test]
-    fn every_gate_fails_when_nothing_was_available_to_test() {
+    fn empty_runs_succeed_with_any_gate_combination() {
         let dir = workdir("run-empty-gated-");
         let root = subject_root(&dir);
-        fs::write(root.join("src/lib.rs"), "pub fn less(a: i32, b: i32) -> bool { a < b }\n").expect("lib");
+        for (source, exclude_files) in [
+            ("pub struct Marker;\n", Vec::new()),
+            ("pub fn less(a: i32, b: i32) -> bool { a < b }\n", vec!["**/*.rs".to_owned()]),
+        ] {
+            fs::write(root.join("src/lib.rs"), source).expect("lib");
+            for (min_score, max_flaky) in [(None, None), (Some(100.0), None), (None, Some(0)), (Some(100.0), Some(0))] {
+                let args = RunArgs {
+                    select: crate::commands::SelectArgs {
+                        dir: root.clone(),
+                        exclude_files: exclude_files.clone(),
+                        ..crate::commands::SelectArgs::default()
+                    },
+                    min_score,
+                    max_flaky,
+                    ..Default::default()
+                };
+                let mut host = Sink::default();
 
-        // Every file is excluded, so discovery finds nothing at all, as with an
-        // over-eager `--exclude-file` or an empty shard without `--in-diff`.
-        for (min_score, max_flaky, gate) in [(Some(100.0), None, "--min-score"), (None, Some(0), "--max-flaky")] {
-            let args = RunArgs {
-                select: crate::commands::SelectArgs {
-                    dir: root.clone(),
-                    exclude_files: vec!["**/*.rs".to_owned()],
-                    ..crate::commands::SelectArgs::default()
-                },
-                dry_run: true,
-                min_score,
-                max_flaky,
-                ..Default::default()
-            };
-            let mut host = Sink::default();
+                let code = run_session(&mut host, &args, When::Never, Styler::new(false)).expect("run session");
 
-            let code = run_session(&mut host, &args, When::Never, Styler::new(false)).expect("run session");
-
-            assert_eq!(code, EXIT_GATE_FAILED);
-            assert!(host.err().contains("never evaluated"), "{}", host.err());
-            assert!(host.err().contains(gate), "{}", host.err());
-            assert!(host.err().contains("--exclude-file"), "{}", host.err());
-            assert!(host.err().contains("--shard-count"), "{}", host.err());
+                assert_eq!(code, EXIT_OK, "{}", host.err());
+                assert!(host.err().contains("no mutants were generated"), "{}", host.err());
+                assert!(!host.err().contains("never evaluated"), "{}", host.err());
+            }
         }
-    }
-
-    /// The same run without a gate made no claim about its score, so an empty population is an
-    /// ordinary answer and must go on succeeding.
-    #[test]
-    fn an_ungated_run_with_nothing_to_test_still_succeeds() {
-        let dir = workdir("run-empty-ungated-");
-        let root = subject_root(&dir);
-        fs::write(root.join("src/lib.rs"), "pub fn less(a: i32, b: i32) -> bool { a < b }\n").expect("lib");
-
-        let args = RunArgs {
-            select: crate::commands::SelectArgs {
-                dir: root,
-                exclude_files: vec!["**/*.rs".to_owned()],
-                ..crate::commands::SelectArgs::default()
-            },
-            dry_run: true,
-            ..Default::default()
-        };
-        let mut host = Sink::default();
-
-        let code = run_session(&mut host, &args, When::Never, Styler::new(false)).expect("run session");
-
-        assert_eq!(code, EXIT_OK);
     }
 
     /// An empty selection still writes its reports, which replace a previous run's.
@@ -6095,9 +5936,7 @@ mod tests {
         });
     }
 
-    /// A population that is not empty but holds nothing scorable — the shard that contained only
-    /// suppressed mutants — is the same failure wearing a different hat: the score is a ratio with
-    /// nothing in its denominator, and a threshold judged against it never ran.
+    /// A nonempty population of excluded mutants cannot establish a mutation score.
     #[test]
     fn a_gated_run_whose_population_is_entirely_suppressed_fails() {
         let dir = workdir("run-suppressed-gated-");

@@ -1,9 +1,12 @@
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
 
+#Requires -Version 7.6
+
 # Run from the repository root: pwsh -NoProfile -File .\scripts\test-release-crate.ps1
-$ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
+$ErrorActionPreference = 'Stop'
+$PSNativeCommandUseErrorActionPreference = $true
 $releaseScript = Join-Path $PSScriptRoot 'release-crate.ps1'
 $fixture = Join-Path ([System.IO.Path]::GetTempPath()) "ox-release-test-$([guid]::NewGuid())"
 
@@ -80,7 +83,56 @@ try {
     if (Compare-Object $before $after) {
         throw 'Backfill changed a manifest or README.'
     }
-    Write-Host 'Release backfill checks passed (first tag, semantic bounds, stability, unchanged manifests and README).'
+
+    $singleFolder = Join-Path $fixture 'crates/single'
+    $singleSrc = Join-Path $singleFolder 'src'
+    $null = New-Item -ItemType Directory -Path $singleSrc -Force
+    $neighbor = 'other = { version  = "9.0.0",  default-features = false } # preserve spacing'
+    "[workspace]`nmembers = [`"crates/single`"]`n[workspace.dependencies]`nsingle = { path = `"crates/single`", version = `"=0.1.0`" }`n$neighbor" |
+        Set-Content Cargo.toml
+    "[package]`nname = `"single`"`nversion = `"0.1.0`"`nedition = `"2024`"" | Set-Content (Join-Path $singleFolder 'Cargo.toml')
+    'pub fn value() -> u8 { 1 }' | Set-Content (Join-Path $singleSrc 'lib.rs')
+    'Single release fixture' | Set-Content (Join-Path $singleFolder 'README.md')
+    Invoke-FixtureGit add .
+    Invoke-FixtureGit commit --quiet -m 'feat(single): initial release'
+    Invoke-FixtureGit tag single-v0.1.0
+    'pub fn value() -> u8 { 2 }' | Set-Content (Join-Path $singleSrc 'lib.rs')
+    Invoke-FixtureGit add .
+    Invoke-FixtureGit commit --quiet -m 'fix(single): sole unreleased change'
+    & $releaseScript single -Version 0.2.0
+    Assert-Contains (Get-Content (Join-Path $singleFolder 'CHANGELOG.md') -Raw) 'sole unreleased change'
+    $manifest = Get-Content Cargo.toml -Raw
+    Assert-Contains $manifest 'single = { path = "crates/single", version = "=0.2.0" }'
+    Assert-Contains $manifest $neighbor
+    $manifest.Replace('version = "=0.2.0"', 'version = "0.2.0"') | Set-Content Cargo.toml -NoNewline
+
+    $fakeBin = Join-Path $fixture 'fake-bin'
+    $null = New-Item -ItemType Directory -Path $fakeBin
+    $realCargo = (Get-Command cargo -CommandType Application -ErrorAction Stop | Select-Object -First 1).Source
+    $escapedCargo = $realCargo.Replace("'", "''")
+    @"
+if (`$args[0] -in @('metadata', 'doc2readme')) {
+    [Console]::Error.WriteLine('intentional optional command failure')
+    exit 23
+}
+& '$escapedCargo' @args
+exit `$LASTEXITCODE
+"@ | Set-Content (Join-Path $fakeBin 'cargo.ps1')
+    "exit 0" | Set-Content (Join-Path $fakeBin 'cargo-doc2readme.ps1')
+    'release readme template' | Set-Content (Join-Path $fixture 'crates/README.j2')
+    $priorPath = $env:PATH
+    try {
+        $env:PATH = "$fakeBin$([IO.Path]::PathSeparator)$priorPath"
+        $bestEffortOutput = & $releaseScript single -Version 0.3.0 *>&1 | Out-String
+    } finally {
+        $env:PATH = $priorPath
+    }
+    Assert-Contains $bestEffortOutput "Failed to generate README"
+    Assert-Contains $bestEffortOutput "Failed to run 'cargo metadata'"
+    $manifest = Get-Content Cargo.toml -Raw
+    Assert-Contains $manifest 'single = { path = "crates/single", version = "0.3.0" }'
+    Assert-Contains $manifest $neighbor
+    Write-Host 'Release checks passed (backfill bounds, single-result handling, native failures and pinned dependencies).'
 }
 finally {
     Pop-Location

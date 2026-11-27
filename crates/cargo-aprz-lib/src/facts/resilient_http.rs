@@ -17,6 +17,10 @@ use fetch::tokio::TokioDeps;
 use fetch::{HeaderMap, HeaderValue, HttpClient, HttpResponse, StatusCode};
 use futures_util::{Stream, StreamExt};
 use http_body_util::BodyExt;
+use jiff::Timestamp;
+use jiff::fmt::rfc2822::DateTimeParser;
+use jiff::fmt::strtime::BrokenDownTime;
+use jiff::tz::TimeZone;
 use layered::{Execute, Service, Stack};
 use ohno::{IntoAppError, app_err};
 use seatbelt::retry::{Backoff, Retry};
@@ -144,34 +148,35 @@ const RETRY_BASE_DELAY: Duration = Duration::from_secs(1);
 /// RFC 9110 allows either delta-seconds or an HTTP-date. Treating a date-valued header as
 /// unparseable would turn a transient rate limit into an immediate failure (403) or force a
 /// much longer default wait (429), so both forms are accepted. A date in the past yields `0`.
-pub fn parse_retry_after_value(value: &str, now: chrono::DateTime<chrono::Utc>) -> Option<u64> {
+pub fn parse_retry_after_value(value: &str, now: Timestamp) -> Option<u64> {
     let value = value.trim();
 
     if let Ok(seconds) = value.parse::<u64>() {
         return Some(seconds);
     }
 
-    let when = chrono::DateTime::parse_from_rfc2822(value)
+    let parse_with_offset = |format| BrokenDownTime::parse(format, value).ok().and_then(|tm| tm.to_timestamp().ok());
+    let parse_as_utc = |format| {
+        BrokenDownTime::parse(format, value)
+            .ok()
+            .and_then(|tm| tm.to_datetime().ok())
+            .and_then(|dt| TimeZone::UTC.to_timestamp(dt).ok())
+    };
+    let when = DateTimeParser::new()
+        .parse_timestamp(value)
         .ok()
-        .map(|dt| dt.with_timezone(&chrono::Utc))
-        .or_else(|| {
-            chrono::NaiveDateTime::parse_from_str(value, "%A, %d-%b-%y %H:%M:%S GMT")
-                .ok()
-                .map(|dt| dt.and_utc())
-        })
-        .or_else(|| {
-            chrono::NaiveDateTime::parse_from_str(value, "%a %b %e %H:%M:%S %Y")
-                .ok()
-                .map(|dt| dt.and_utc())
-        })?;
+        .or_else(|| parse_with_offset("%a, %d %b %Y %H:%M:%S %z"))
+        .or_else(|| parse_as_utc("%a, %d %b %Y %H:%M:%S GMT"))
+        .or_else(|| parse_as_utc("%A, %d-%b-%y %H:%M:%S GMT"))
+        .or_else(|| parse_as_utc("%a %b %e %H:%M:%S %Y"))?;
 
-    Some((when - now).num_seconds().max(0).cast_unsigned())
+    Some((when - now).as_secs().max(0).cast_unsigned())
 }
 
 /// Parse the `Retry-After` header as seconds.
 fn parse_retry_after(headers: &HeaderMap) -> Option<u64> {
     let s = headers.get(RETRY_AFTER).and_then(|h| h.to_str().ok())?;
-    parse_retry_after_value(s, chrono::Utc::now())
+    parse_retry_after_value(s, Timestamp::now())
 }
 
 /// Classify an HTTP response for retry purposes.
@@ -331,7 +336,6 @@ where
 mod tests {
     use core::sync::atomic::{AtomicU32, Ordering};
 
-    use chrono::{TimeZone as _, Utc};
     use seatbelt::RecoveryKind;
     use tracing::Subscriber;
     use wiremock::matchers::{method, path};
@@ -538,7 +542,7 @@ mod tests {
     }
     #[test]
     fn parses_delta_seconds() {
-        let now = Utc.with_ymd_and_hms(1994, 11, 6, 8, 49, 37).unwrap();
+        let now = "1994-11-06T08:49:37Z".parse::<Timestamp>().unwrap();
         assert_eq!(parse_retry_after_value("120", now), Some(120));
         assert_eq!(parse_retry_after_value("  120 ", now), Some(120));
         assert_eq!(parse_retry_after_value("0", now), Some(0));
@@ -546,7 +550,7 @@ mod tests {
 
     #[test]
     fn parses_http_date() {
-        let now = Utc.with_ymd_and_hms(1994, 11, 6, 8, 49, 37).unwrap();
+        let now = "1994-11-06T08:49:37Z".parse::<Timestamp>().unwrap();
 
         // IMF-fixdate, the form servers are required to send.
         assert_eq!(parse_retry_after_value("Sun, 06 Nov 1994 08:51:37 GMT", now), Some(120));
@@ -557,14 +561,30 @@ mod tests {
     }
 
     #[test]
+    fn parses_rfc_2822_date_with_non_utc_offset() {
+        let now = "1994-11-06T08:49:37Z".parse::<Timestamp>().unwrap();
+        assert_eq!(parse_retry_after_value("Sun, 06 Nov 1994 09:51:37 +0100", now), Some(120));
+        assert_eq!(parse_retry_after_value("6 Nov 1994 03:51:37 EST", now), Some(120));
+    }
+
+    #[test]
+    fn parses_legacy_date_spellings_outside_rfc_2822() {
+        let now = "1994-11-06T08:49:37Z".parse::<Timestamp>().unwrap();
+        assert_eq!(parse_retry_after_value("Sun, 06 Nov 1994 08:51:37 +000000", now), Some(120));
+
+        let now = TimeZone::UTC.to_timestamp(jiff::civil::date(-1, 1, 1).at(0, 0, 0, 0)).unwrap();
+        assert_eq!(parse_retry_after_value("Fri, 01 Jan -0001 00:02:00 GMT", now), Some(120));
+    }
+
+    #[test]
     fn past_dates_do_not_underflow() {
-        let now = Utc.with_ymd_and_hms(1994, 11, 6, 8, 49, 37).unwrap();
+        let now = "1994-11-06T08:49:37Z".parse::<Timestamp>().unwrap();
         assert_eq!(parse_retry_after_value("Sun, 06 Nov 1994 08:00:00 GMT", now), Some(0));
     }
 
     #[test]
     fn rejects_unparseable_values() {
-        let now = Utc.with_ymd_and_hms(1994, 11, 6, 8, 49, 37).unwrap();
+        let now = "1994-11-06T08:49:37Z".parse::<Timestamp>().unwrap();
         assert_eq!(parse_retry_after_value("soon", now), None);
         assert_eq!(parse_retry_after_value("", now), None);
         assert_eq!(parse_retry_after_value("-5", now), None);
@@ -1037,20 +1057,79 @@ mod tests {
         assert_eq!(attempts.load(Ordering::Relaxed), 2);
     }
 
-    #[tokio::test(start_paused = true)]
-    #[cfg_attr(miri, ignore = "requires tokio timers")]
+    #[tokio::test]
     async fn download_honors_a_custom_timeout() {
-        let error = resilient_download("test_download", (), Some(Duration::from_millis(1)), delayed_success)
-            .await
-            .expect_err("every attempt must exceed the custom timeout");
+        let control = tick::ClockControl::new();
+        // Polled on this task only; the counter records calls without publishing shared state.
+        let attempts = Arc::new(AtomicU32::new(0));
+        let download = resilient_download_with_clock(
+            "test_download",
+            (),
+            Some(Duration::from_millis(1)),
+            {
+                let attempts = Arc::clone(&attempts);
+                move |()| {
+                    attempts.fetch_add(1, Ordering::Relaxed);
+                    core::future::pending::<crate::Result<()>>()
+                }
+            },
+            control.to_clock(),
+        );
+        let mut download = std::pin::pin!(download);
+
+        assert!(futures_util::poll!(&mut download).is_pending());
+        assert_eq!(attempts.load(Ordering::Relaxed), 1);
+        let total_attempts = MAX_RETRY_ATTEMPTS + 1;
+        // Poll each deadline so the retry wrapper enters backoff; the next advance starts a
+        // fresh stalled attempt rather than extending the previous attempt's custom timeout.
+        for attempt in 1..=total_attempts {
+            control.advance(Duration::from_millis(1));
+            if attempt < total_attempts {
+                assert!(futures_util::poll!(&mut download).is_pending());
+                assert_eq!(attempts.load(Ordering::Relaxed), attempt, "backoff precedes the next attempt");
+                control.advance(RETRY_BASE_DELAY * 2_u32.pow(attempt));
+                assert!(futures_util::poll!(&mut download).is_pending());
+                assert_eq!(attempts.load(Ordering::Relaxed), attempt + 1);
+            }
+        }
+        let std::task::Poll::Ready(result) = futures_util::poll!(&mut download) else {
+            panic!("the final stalled download must fail at its custom deadline");
+        };
+        let error = result.expect_err("every attempt must exceed the custom timeout");
 
         assert!(error.to_string().contains("download timed out"), "{error}");
+        assert_eq!(attempts.load(Ordering::Relaxed), total_attempts);
     }
 
-    #[cfg_attr(coverage_nightly, coverage(off))]
-    async fn delayed_success(_unit: ()) -> crate::Result<()> {
-        tokio::time::sleep(Duration::from_millis(50)).await;
-        Ok(())
+    #[tokio::test]
+    async fn download_entry_point_forwards_the_custom_timeout() {
+        struct PendingAttempt(Arc<AtomicU32>);
+
+        impl Drop for PendingAttempt {
+            fn drop(&mut self) {
+                self.0.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+
+        let cancelled = Arc::new(AtomicU32::new(0));
+        let download = resilient_download("custom_deadline", (), Some(Duration::ZERO), {
+            let cancelled = Arc::clone(&cancelled);
+            move |()| {
+                let attempt = PendingAttempt(Arc::clone(&cancelled));
+                async move {
+                    let _attempt = attempt;
+                    core::future::pending::<crate::Result<()>>().await
+                }
+            }
+        });
+        let mut download = std::pin::pin!(download);
+
+        assert!(futures_util::poll!(&mut download).is_pending());
+        assert_eq!(
+            cancelled.load(Ordering::Relaxed),
+            1,
+            "the zero custom deadline must cancel the pending attempt before retry backoff"
+        );
     }
 
     #[tokio::test]

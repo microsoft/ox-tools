@@ -4582,7 +4582,7 @@ fn nested_expression_content_ranges_end_at_the_expression_not_after_its_closing_
     let outer = span(source, "#[allow(unused)] { #[allow(dead_code)] value(); }");
     let inner = span(source, "#[allow(dead_code)] value()");
     assert_eq!(
-        super::expression_contents(&file, &mut HashSet::default()),
+        super::read_only::Evidence::of(&file).expressions,
         [
             (outer.clone(), span(source, "#[allow(unused)]").end..outer.end),
             (inner.clone(), span(source, "#[allow(dead_code)]").end..inner.end),
@@ -5130,14 +5130,17 @@ fn method_function_context_keeps_parameters_after_self_and_initializes_unsigned_
 
 #[test]
 fn parameter_shadowing_keeps_iterator_shapes_skips_ref_bindings_and_withholds_other_opaque_returns() {
-    let source = "fn f(ref skipped: u8, value: bool) -> impl Iterator<Item = u8> { 0..3 }";
+    let source = "fn f(ref skipped: u8, value: bool) -> impl Iterator<Item = u8> { core::iter::once(if value { 1 } else { 0 }) }";
     let file = SourceFile::parse("fixture.rs", source.into()).unwrap();
     let selection = Selection::parse("parameter.default_shadow").unwrap();
     let candidates = collect_with(&file, &selection, &CfgSet::unconditional(), &Defaults::of(&file.ast));
     assert_eq!(candidates.len(), 1);
     assert_eq!(candidates[0].replacement_index, 1);
     assert_eq!(candidates[0].shape, super::Shape::IterBlock);
-    assert_eq!(candidates[0].replacement, "{ let value: bool = Default::default(); 0..3 }");
+    assert_eq!(
+        candidates[0].replacement,
+        "{ let value: bool = Default::default(); core::iter::once(if value { 1 } else { 0 }) }"
+    );
 
     let file = SourceFile::parse("fixture.rs", "fn f(value: u8) -> impl core::fmt::Display { value }".into()).unwrap();
     assert!(collect_with(&file, &selection, &CfgSet::unconditional(), &Defaults::of(&file.ast)).is_empty());

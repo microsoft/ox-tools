@@ -2,6 +2,16 @@
 
 ## [Unreleased]
 
+## [0.9.0] - 2026-11-24
+
+- ✨ Features
+
+  - cargo-each: add cargo-specs and unified source-qualified inputs
+
+- 🐛 Bug Fixes
+
+  - cargo-gamma: strengthen admission proofs and compiler isolation ([#367](https://github.com/microsoft/ox-tools/pull/367))
+
 ## [0.8.0] - 2026-11-12
 
 - ✨ Features

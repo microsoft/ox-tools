@@ -4,7 +4,7 @@
 [package]
 name = "cargo-coverage-gate"
 description = "A cargo subcommand that gates pull requests on per-package line coverage measured by cargo-llvm-cov"
-version = "0.7.5"
+version = "0.7.6"
 readme = "README.md"
 keywords = ["oxidizer", "cargo", "subcommand", "coverage", "ci"]
 categories = ["command-line-utilities", "development-tools::cargo-plugins"]
@@ -18,6 +18,9 @@ repository = "https://github.com/microsoft/ox-tools/tree/main/crates/cargo-cover
 
 [package.metadata.docs.rs]
 all-features = true
+
+[package.metadata.anvil]
+catalog-tool = "cargo-coverage-gate"
 
 [package.metadata.cargo_check_external_types]
 # The `#[ohno::error]` attribute on `CoverageGateError` implements

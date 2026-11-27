@@ -725,6 +725,26 @@ mod tests {
     }
 
     #[test]
+    fn idle_footer_names_every_directive_and_is_absent_when_none_are_idle() {
+        let mut population = plan();
+        let quiet = rendered_with(&population, Listings::default());
+        assert!(!quiet.contains("superfluous skip"));
+        population.idle = (1..=3)
+            .map(|line| crate::suppress::Idle {
+                file: format!("src/m{line}.rs").into(),
+                line,
+                selectors: "arith".into(),
+                reason: None,
+            })
+            .collect();
+        let text = rendered_with(&population, Listings::default());
+        assert!(text.contains("3 superfluous skip directives"), "{text}");
+        for line in 1..=3 {
+            assert!(text.contains(&format!("src/m{line}.rs:{line}: skip(arith)")), "{text}");
+        }
+    }
+
+    #[test]
     fn a_blank_line_introduces_the_summary_when_no_result_listing_precedes_it() {
         let mut population = plan();
         let mut killed = mutant(1, Outcome::Killed);

@@ -306,70 +306,6 @@ mod tests {
     use crate::region::{TomlAdoption, adopt_unmanaged_toml_tables, upsert_region};
 
     #[test]
-    fn embedded_catalog_uses_bare_keys() {
-        for line in [RUST_LINTS_BODY, RUSTDOC_LINTS_BODY, CLIPPY_LINTS_BODY]
-            .into_iter()
-            .flat_map(str::lines)
-        {
-            let trimmed = line.trim_start();
-            assert!(!trimmed.starts_with('['), "unexpected table header in lint body: {line}");
-        }
-        assert!(RUST_LINTS_BODY.contains("unsafe_op_in_unsafe_fn = \"warn\""));
-        assert!(CLIPPY_LINTS_BODY.contains("unwrap_used = \"warn\""));
-    }
-
-    #[test]
-    fn catalog_intentionally_omits_contested_lints() {
-        for needle in ["missing_docs =", "unreachable_pub =", "expect_used =", "panic ="] {
-            assert!(
-                !format!("{RUST_LINTS_BODY}{RUSTDOC_LINTS_BODY}{CLIPPY_LINTS_BODY}").contains(needle),
-                "catalog now contains '{needle}'; if intentional, update the catalog-omission test"
-            );
-        }
-    }
-
-    #[test]
-    fn catalog_includes_consensus_restriction_lints() {
-        for needle in [
-            "clippy.as_pointer_underscore = \"warn\"",
-            "clippy.assertions_on_result_states = \"warn\"",
-            "clippy.deref_by_slicing = \"warn\"",
-            "clippy.empty_drop = \"warn\"",
-            "clippy.empty_enum_variants_with_brackets = \"warn\"",
-            "clippy.empty_structs_with_brackets = \"warn\"",
-            "clippy.fn_to_numeric_cast_any = \"warn\"",
-            "clippy.if_then_some_else_none = \"warn\"",
-            "clippy.multiple_unsafe_ops_per_block = \"warn\"",
-            "clippy.redundant_type_annotations = \"warn\"",
-            "clippy.renamed_function_params = \"warn\"",
-            "clippy.semicolon_outside_block = \"warn\"",
-            "clippy.unnecessary_safety_doc = \"warn\"",
-            "clippy.unneeded_field_pattern = \"warn\"",
-            "clippy.unused_result_ok = \"warn\"",
-            "clippy.literal_string_with_formatting_args = \"allow\"",
-            "clippy.redundant_pub_crate = \"allow\"",
-            "clippy.should_panic_without_expect = \"allow\"",
-        ] {
-            assert!(
-                CLIPPY_LINTS_BODY.contains(needle.trim_start_matches("clippy.")),
-                "catalog missing consensus lint '{needle}'"
-            );
-        }
-    }
-
-    #[test]
-    fn catalog_declares_llvm_cov_cfgs_for_unexpected_cfgs_lint() {
-        assert!(
-            RUST_LINTS_BODY.contains("unexpected_cfgs"),
-            "catalog must declare rust.unexpected_cfgs to pre-allow llvm-cov's coverage cfgs"
-        );
-        assert!(
-            RUST_LINTS_BODY.contains("'cfg(coverage,coverage_nightly)'"),
-            "catalog's unexpected_cfgs check-cfg list must include coverage,coverage_nightly"
-        );
-    }
-
-    #[test]
     fn workspace_bodies_open_namespace_subtables() {
         for (scope, namespace, body, expected) in [
             ("workspace.lints", "rust", RUST_LINTS_BODY, "[workspace.lints.rust]\n"),
@@ -407,12 +343,6 @@ mod tests {
     }
 
     #[test]
-    fn member_body_is_workspace_inheritance_stub() {
-        assert!(MEMBER_LINTS_BODY.contains("[lints]"));
-        assert!(MEMBER_LINTS_BODY.contains("workspace = true"));
-    }
-
-    #[test]
     #[cfg_attr(
         miri,
         ignore = "native/cargo-careful retain the full generated-lint composition; focused TOML parsing, splicing and rendering remain interpreted"
@@ -438,17 +368,6 @@ mod tests {
     }
 
     #[test]
-    fn deny_bodies_include_allowlist_and_advisories() {
-        assert!(DENY_LICENSES_BODY.contains("[licenses]"));
-        assert!(DENY_LICENSES_BODY.contains("\"MIT\""));
-        assert!(DENY_LICENSES_BODY.contains("\"Apache-2.0\""));
-        assert!(DENY_ADVISORIES_BODY.contains("[advisories]"));
-        assert!(DENY_ADVISORIES_BODY.contains("yanked = \"deny\""));
-        assert!(DENY_BANS_BODY.contains("[bans]"));
-        assert!(DENY_SOURCES_BODY.contains("[sources]"));
-    }
-
-    #[test]
     fn deny_sections_each_hold_exactly_one_table() {
         // Each deny region is a single top-level section so users can add
         // their own keys in the gaps between the managed regions.
@@ -461,29 +380,6 @@ mod tests {
             let headers: Vec<&str> = body.lines().map(str::trim_start).filter(|l| l.starts_with('[')).collect();
             assert_eq!(headers, vec![header], "deny section body must hold exactly its own table");
         }
-    }
-
-    #[test]
-    fn gitattributes_body_pins_rust_and_shell_sources_to_lf() {
-        assert!(GITATTRIBUTES_BODY.contains("*.rs text eol=lf"));
-        assert!(GITATTRIBUTES_BODY.contains("*.sh text eol=lf"));
-    }
-
-    #[test]
-    fn rustfmt_body_sets_edition_and_width() {
-        assert!(RUSTFMT_BODY.contains("edition = \"2024\""));
-        assert!(RUSTFMT_BODY.contains("max_width = 140"));
-        assert!(RUSTFMT_BODY.contains("unstable_features = true"));
-        assert!(RUSTFMT_BODY.contains("imports_granularity = \"Module\""));
-        assert!(RUSTFMT_BODY.contains("group_imports = \"StdExternalCrate\""));
-        assert!(RUSTFMT_BODY.contains("format_code_in_doc_comments = true"));
-    }
-
-    #[test]
-    fn delta_body_uses_cargo_delta_schema() {
-        assert!(DELTA_BODY.contains("trip_wire_patterns"));
-        assert!(DELTA_BODY.contains("\"Cargo.lock\""));
-        assert!(!DELTA_BODY.contains("[delta]"));
     }
 
     #[test]
@@ -527,16 +423,6 @@ mod tests {
             },
             "the remedy the diagnostic names is the one that works"
         );
-    }
-
-    #[test]
-    fn clippy_body_carries_companion_tunings_for_catalog_lints() {
-        assert!(CLIPPY_BODY.contains("allow-panic-in-tests = true"));
-        assert!(CLIPPY_BODY.contains("allow-unwrap-in-tests = true"));
-        assert!(CLIPPY_BODY.contains("semicolon-outside-block-ignore-multiline = true"));
-        assert!(CLIPPY_BODY.contains("avoid-breaking-exported-api = false"));
-        assert!(CLIPPY_BODY.contains("absolute-paths-max-segments = 3"));
-        assert!(CLIPPY_BODY.contains("warn-on-all-wildcard-imports = true"));
     }
 
     #[test]

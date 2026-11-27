@@ -224,7 +224,7 @@ fn scale(peak: u64, multiplier: f64) -> u64 {
     #[expect(clippy::cast_precision_loss, reason = "the comparison only needs to be right near the boundary")]
     let most = u64::MAX as f64;
 
-    // #[gamma::skip(all, reason = "the branch handles process, filesystem, platform, or synchronization state that cannot be forced safely and deterministically in unit tests")]
+    // #[gamma::skip(logical.or_remove_right, relational.ge_to_gt, tag = "equivalent", reason = "Finite values at or above most also saturate to u64::MAX in the float-to-integer cast.")]
     if !scaled.is_finite() || scaled >= most {
         return u64::MAX;
     }
@@ -243,6 +243,18 @@ fn scale(peak: u64, multiplier: f64) -> u64 {
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_unbounded_multiplier_saturates_even_for_a_zero_measured_peak() {
+        let policy = MemoryPolicy {
+            control: MemoryControl::Enforce,
+            multiplier: f64::INFINITY,
+            headroom: 0,
+            ..MemoryPolicy::default()
+        };
+        assert_eq!(policy.ceiling(Some(0), true), Some(u64::MAX));
+        assert_eq!(policy.ceiling(Some(1), true), Some(u64::MAX));
+    }
 
     #[test]
     fn calibrated_binaries_without_an_observed_peak_have_no_invented_ceiling() {

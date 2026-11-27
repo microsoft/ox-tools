@@ -4,8 +4,9 @@
 [package]
 name = "cargo-gamma-process"
 description = "Internal bounded process-tree lifecycle for cargo-gamma"
-version = "0.6.0"
+version = "0.8.0"
 readme = "README.md"
+exclude = ["tests/capture.rs", "tests/support/**"]
 keywords = ["cargo", "mutation-testing", "testing"]
 categories = ["development-tools::testing"]
 
@@ -32,12 +33,15 @@ fault-injection = []
 
 [dependencies]
 cargo-gamma-unsafe = { workspace = true }
+ohno = { workspace = true }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 libc = { workspace = true }
 
 [dev-dependencies]
+bolero = { workspace = true }
 camino = { workspace = true }
+cargo-gamma-process-test-helper = { path = "tests/support/output-helper" }
 tempfile = { workspace = true }
 
 # >>> anvil-managed: anvil-lints

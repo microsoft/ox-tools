@@ -6,11 +6,13 @@
 #![expect(clippy::renamed_function_params, reason = "syn names all visitor parameters i")]
 
 use quote::quote;
+#[cfg(test)]
 use syn::spanned::Spanned as _;
 use syn::visit::{self, Visit};
 use syn::{BinOp, Expr, FnArg, Item, Pat, Stmt, Type};
 
 use crate::ops::collect::resource_namespaces::{Namespaces, declaration_attributes};
+use crate::parse::Extent as _;
 use crate::{HashMap, HashSet};
 
 mod diagonal;
@@ -33,20 +35,16 @@ fn name(expression: &Expr) -> Option<String> {
 }
 
 fn local(statement: &Stmt) -> Option<(String, &Expr)> {
-    // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
     let Stmt::Local(local) = statement else { return None };
     if !local.attrs.is_empty() {
-        // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
         return None;
     }
     let pat = match &local.pat {
         Pat::Type(pat) => &*pat.pat,
         pat => pat,
     };
-    // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
     let Pat::Ident(pat) = pat else { return None };
     if !pat.attrs.is_empty() || pat.by_ref.is_some() || pat.subpat.is_some() {
-        // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
         return None;
     }
     let init = local.init.as_ref().filter(|init| init.diverge.is_none())?;
@@ -54,31 +52,25 @@ fn local(statement: &Stmt) -> Option<(String, &Expr)> {
 }
 
 fn method<'a>(expression: &'a Expr, expected: &str, arity: usize) -> Option<&'a syn::ExprMethodCall> {
-    // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
     let Expr::MethodCall(call) = expression else { return None };
     (call.attrs.is_empty() && call.turbofish.is_none() && call.method == expected && call.args.len() == arity).then_some(call)
 }
 
 fn argument<'a>(ty: &'a Type, expected: &str) -> Option<&'a Type> {
-    // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
     let Type::Path(path) = ty else { return None };
     if !path.attrs.is_empty() || path.qself.is_some() || path.path.segments.len() != 1 {
-        // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
         return None;
     }
     // #[gamma::skip(iter.first_to_last, try.propagate_to_unwrap, reason = "The preceding exact singleton path check guarantees this sole segment exists.", tag = "equivalent")]
     let segment = path.path.segments.first()?;
     let syn::PathArguments::AngleBracketed(arguments) = &segment.arguments else {
-        // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
         return None;
     };
     if segment.ident != expected || arguments.args.len() != 1 {
-        // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
         return None;
     }
     // #[gamma::skip(iter.first_to_last, try.propagate_to_unwrap, reason = "The preceding exact arity check guarantees this sole argument exists.", tag = "equivalent")]
     let syn::GenericArgument::Type(ty) = arguments.args.first()? else {
-        // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
         return None;
     };
     Some(ty)
@@ -110,7 +102,7 @@ impl Cursor {
             fn visit_file(&mut self, node: &'ast syn::File) {
                 for item in &node.items {
                     if let Item::Fn(function) = item
-                        && function.span().byte_range().contains(&self.target.start)
+                        && function.extent().byte_range().contains(&self.target.start)
                     {
                         self.visit_item_fn(function);
                         // #[gamma::skip(loop.break_to_continue, loop.delete_break, reason = "Parsed top-level function spans are disjoint, so no later function can contain this target.", tag = "equivalent")]
@@ -121,7 +113,7 @@ impl Cursor {
 
             fn visit_item_fn(&mut self, node: &'ast syn::ItemFn) {
                 // #[gamma::skip(cond.always_false, reason = "The sole caller has just checked the identical immutable function span contains this target.", tag = "equivalent")]
-                if !node.span().byte_range().contains(&self.target.start) {
+                if !node.extent().byte_range().contains(&self.target.start) {
                     return;
                 }
                 // #[gamma::skip(logical.or_remove_left, reason = "Required closed-method namespace evidence independently rejects active functions with unknown declaration attributes.", tag = "equivalent")]
@@ -140,7 +132,7 @@ impl Cursor {
                 for argument in &node.sig.inputs {
                     if let FnArg::Typed(argument) = argument
                         && let Pat::Ident(pat) = &*argument.pat
-                        && argument.ty.span().byte_range().len() <= 256
+                        && argument.ty.extent().byte_range().len() <= 256
                         && argument.attrs.is_empty()
                         && pat.attrs.is_empty()
                         && pat.by_ref.is_none()
@@ -187,7 +179,7 @@ impl Cursor {
 
             fn visit_block(&mut self, block: &'ast syn::Block) {
                 // #[gamma::skip(literal.int_increment, reason = "Visiting the last allowance decrements it to zero, which final admission independently rejects.", tag = "equivalent")]
-                if self.remaining == 0 || !block.span().byte_range().contains(&self.target.start) {
+                if self.remaining == 0 || !block.extent().byte_range().contains(&self.target.start) {
                     return;
                 }
                 self.remaining -= 1;
@@ -210,18 +202,18 @@ impl Cursor {
                     )
                     .enumerate()
                 {
-                    if statement.span().byte_range().start >= self.target.start {
-                        self.reached = statement.span().byte_range().start == self.target.start;
+                    if statement.extent().byte_range().start >= self.target.start {
+                        self.reached = statement.extent().byte_range().start == self.target.start;
                         self.context.entry = at.checked_sub(1).and_then(|previous| {
                             let statement = &block.stmts[previous];
                             // #[gamma::skip(logical.and_remove_left, reason = "The sole entry consumer diagonal independently calls local on this retained statement.", tag = "equivalent")]
-                            (local(statement).is_some() && statement.span().byte_range().len() <= 1024).then(|| statement.clone())
+                            (local(statement).is_some() && statement.extent().byte_range().len() <= 1024).then(|| statement.clone())
                         });
                         break;
                     }
                     if let Stmt::Local(local) = statement {
-                        if local.init.as_ref().is_some_and(|init| init.expr.span().byte_range().len() > 1024)
-                            || matches!(&local.pat, Pat::Type(pattern) if pattern.ty.span().byte_range().len() > 256)
+                        if local.init.as_ref().is_some_and(|init| init.expr.extent().byte_range().len() > 1024)
+                            || matches!(&local.pat, Pat::Type(pattern) if pattern.ty.extent().byte_range().len() > 256)
                         {
                             // #[gamma::skip(stmt.delete_assign, literal.bool_flip, reason = "This branch returns before the target statement; the enclosing scan breaks and reached remains false.", tag = "equivalent")]
                             self.valid = false;
@@ -275,26 +267,25 @@ impl Cursor {
                             }
                         }
                     }
-                    if statement.span().byte_range().contains(&self.target.start) {
+                    if statement.extent().byte_range().contains(&self.target.start) {
                         visit::visit_stmt(self, statement);
                         break;
                     }
                 }
             }
         }
-        // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
         let Expr::While(outer) = expression else { return None };
         if (
-            // #[gamma::skip(logical.or_remove_right, reason = "Final applicable validation repeats the closed loop shape; inline-module targets cannot be reached by the top-level-function-only visitor.", tag = "equivalent")]
-            expression.span().byte_range().len() > 4096
-                || !matches!((&*outer.cond, outer.body.stmts.len()), (Expr::Let(_), 2) | (Expr::Binary(_), 6 | 7))
-                || !inline.is_empty()
-        ) || !sources.numeric_scope_for(source, inline)
-            || !sources.closed_methods_for(source, inline)
+            // #[gamma::skip(logical.or_remove_left, reason = "applicable independently rejects other loop shapes, and the top-level-function visitor cannot reach inline-module targets.", tag = "equivalent")]
+            (
+                // #[gamma::skip(logical.or_remove_left, logical.or_remove_right, logical.or_to_and, reason = "applicable independently rejects other loop shapes, and the top-level-function visitor cannot reach inline-module targets.", tag = "equivalent")]
+                !matches!((&*outer.cond, outer.body.stmts.len()), (Expr::Let(_), 2) | (Expr::Binary(_), 6 | 7)) || !inline.is_empty()
+            ) || !sources.numeric_scope_for(source, inline)
+        ) || !sources.closed_methods_for(source, inline)
             || file.items.len() > 256
             || !declaration_attributes(&file.attrs)
+            || expression.extent().byte_range().len() > 4096
         {
-            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
             return None;
         }
         let mut records = HashMap::default();
@@ -308,7 +299,7 @@ impl Cursor {
                 .iter()
                 .map(|field| {
                     // #[gamma::skip(logical.or_remove_right, relational.gt_to_ge, literal.int_decrement, literal.int_increment, reason = "The only consumer requires every frame field to be a bare primitive identifier, whose type span is far below this limit.", tag = "equivalent")]
-                    if !field.attrs.is_empty() || field.ty.span().byte_range().len() > 256 {
+                    if !field.attrs.is_empty() || field.ty.extent().byte_range().len() > 256 {
                         return None;
                     }
                     Some((field.ident.as_ref()?.to_string(), field.ty.clone()))
@@ -321,7 +312,7 @@ impl Cursor {
             }
         }
         let mut find = Find {
-            target: expression.span().byte_range(),
+            target: expression.extent().byte_range(),
             context: Self {
                 types: HashMap::default(),
                 records,
@@ -341,7 +332,6 @@ impl Cursor {
     fn applicable(&self, expression: &Expr) -> bool {
         let mut probe = expression.clone();
         let Expr::While(outer) = &mut probe else {
-            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "false is already the default bool value.")]
             return false; // #[gamma::skip(literal.bool_flip, reason = "The sole caller already established this same expression is a While.", tag = "equivalent")]
         };
         if let [_, Stmt::Expr(Expr::If(edge), _)] = outer.body.stmts.as_mut_slice()
@@ -362,23 +352,19 @@ impl Cursor {
             Expr::Path(_) => types.get(&name(expression)?).cloned(),
             Expr::Field(field) if field.attrs.is_empty() => {
                 let Type::Path(record) = self.ty(&field.base, types)? else {
-                    // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
                     return None;
                 };
                 let record = record.path.get_ident()?.to_string();
-                // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
                 let syn::Member::Named(member) = &field.member else { return None };
                 self.records.get(&record)?.get(&member.to_string()).cloned()
             }
             Expr::Index(index) if index.attrs.is_empty() => {
                 if self.ty(&index.index, types)? != syn::parse_quote!(usize) {
-                    // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
                     return None;
                 }
                 let ty = self.ty(&index.expr, types)?;
                 match &ty {
                     Type::Reference(reference) if reference.mutability.is_none() => {
-                        // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
                         let Type::Slice(slice) = &*reference.elem else { return None };
                         Some((*slice.elem).clone())
                     }
@@ -419,9 +405,7 @@ impl Cursor {
             Expr::Macro(node) if node.attrs.is_empty() && node.mac.path.is_ident("vec") => {
                 let tokens = &node.mac.tokens;
                 let repeat = syn::parse2::<syn::ExprRepeat>(quote!([#tokens])).ok()?;
-                // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
                 let Expr::Lit(literal) = &*repeat.expr else { return None };
-                // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
                 let syn::Lit::Int(literal) = &literal.lit else { return None };
                 (literal.suffix() == "isize").then(|| syn::parse_quote!(Vec<isize>))
             }
@@ -449,37 +433,27 @@ impl Cursor {
                 self.found |= node.path.is_ident(self.written);
             }
         }
-        // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
         let Expr::While(loop_) = expression else { return None };
         if !loop_.attrs.is_empty() || loop_.label.is_some() {
-            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
             return None;
         }
-        // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
         let Expr::Let(binding) = &*loop_.cond else { return None };
-        // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
         let Pat::TupleStruct(some) = &*binding.pat else { return None };
         if !binding.attrs.is_empty() || !some.attrs.is_empty() || !some.path.is_ident("Some") || some.elems.len() != 1 {
-            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
             return None;
         }
-        // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
         let Pat::Ident(frame) = &some.elems[0] else { return None };
         if !frame.attrs.is_empty() || frame.by_ref.is_some() || frame.subpat.is_some() {
-            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
             return None;
         }
         let last = method(&binding.expr, "last_mut", 0)?;
         let stack = name(&last.receiver)?;
         let frame_type = argument(self.types.get(&stack)?, "Vec")?;
-        // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
         let Type::Path(record) = frame_type else { return None };
         if !self.records.get(&record.path.get_ident()?.to_string())?.values().all(scalar) {
-            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
             return None;
         }
         let [node, Stmt::Expr(Expr::If(edge), _)] = loop_.body.stmts.as_slice() else {
-            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
             return None;
         };
         let (node_name, node_value) = local(node)?;
@@ -490,23 +464,17 @@ impl Cursor {
             types.contains_key(&node_name) || frame.ident == node_name
         ) || self.ty(node_value, &types)? != syn::parse_quote!(usize)
         {
-            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
             return None;
         }
-        // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
         let Expr::Field(node_field) = node_value else { return None };
         if name(&node_field.base).as_deref() != Some(&frame.ident.to_string()) {
-            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
             return None;
         }
         let _old = types.insert(node_name, syn::parse_quote!(usize));
         if !edge.attrs.is_empty() {
-            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
             return None;
         }
-        // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
         let Expr::Binary(bound) = &*edge.cond else { return None };
-        // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
         let Expr::Field(cursor) = &*bound.left else { return None };
         if !bound.attrs.is_empty()
             || !matches!(bound.op, BinOp::Lt(_))
@@ -514,31 +482,25 @@ impl Cursor {
             || name(&cursor.base).as_deref() != Some(&frame.ident.to_string())
             || self.ty(&bound.left, &types)? != syn::parse_quote!(usize)
         {
-            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
             return None;
         }
         let length = method(&bound.right, "len", 0)?;
         let row_type = self.ty(&length.receiver, &types)?;
         if argument(&row_type, "Vec") != Some(&syn::parse_quote!(usize)) {
-            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
             return None;
         }
         let (neighbor, lookup) = local(edge.then_branch.stmts.first()?)?;
-        // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
         let Expr::Index(lookup) = lookup else { return None };
         if !lookup.attrs.is_empty() || lookup.expr != length.receiver || lookup.index != bound.left || types.contains_key(&neighbor) {
-            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
             return None;
         }
         let _old = types.insert(neighbor, syn::parse_quote!(usize));
         let (middle, tail) = edge.then_branch.stmts[1..].split_last()?;
         if tail.len() > 1 {
-            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
             return None;
         }
         for statement in tail {
             let Stmt::Expr(Expr::Binary(update), _) = statement else {
-                // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
                 return None;
             };
             if !update.attrs.is_empty()
@@ -546,47 +508,35 @@ impl Cursor {
                 || update.left != bound.left
                 || !super::integer_zero(&update.right)
             {
-                // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
                 return None;
             }
         }
-        // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
         let Stmt::Expr(Expr::If(visited), _) = middle else { return None };
         if !visited.attrs.is_empty() {
-            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
             return None;
         }
-        // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
         let Expr::Let(known) = &*visited.cond else { return None };
-        // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
         let Pat::TupleStruct(some) = &*known.pat else { return None };
         if !known.attrs.is_empty() || !some.attrs.is_empty() || !some.path.is_ident("Some") || some.elems.len() != 1 {
-            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
             return None;
         }
-        // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
         let Pat::Ident(index) = &some.elems[0] else { return None };
         if !index.attrs.is_empty() || index.by_ref.is_some() || index.subpat.is_some() || types.contains_key(&index.ident.to_string()) {
-            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
             return None;
         }
         let option = self.ty(&known.expr, &types)?;
         let item = argument(&option, "Option")?;
         if !scalar(item) {
-            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
             return None;
         }
         let _old = types.insert(index.ident.to_string(), item.clone());
         let [Stmt::Expr(Expr::If(on_stack), _)] = visited.then_branch.stmts.as_slice() else {
-            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
             return None;
         };
         if !on_stack.attrs.is_empty() || on_stack.else_branch.is_some() || self.ty(&on_stack.cond, &types)? != syn::parse_quote!(bool) {
-            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
             return None;
         }
         let [Stmt::Expr(Expr::Assign(update), _)] = on_stack.then_branch.stmts.as_slice() else {
-            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
             return None;
         };
         let minimum = method(&update.right, "min", 1)?;
@@ -595,12 +545,10 @@ impl Cursor {
             || self.ty(&update.left, &types)? != *item
             || name(&minimum.args[0]).as_deref() != Some(&index.ident.to_string())
         {
-            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
             return None;
         }
         // The only write is an idempotent primitive minimum. Its vector must be distinct from
         // every vector that selects this branch, and the frame stack itself is untouched.
-        // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
         let Expr::Index(written) = &*update.left else { return None };
         let written = name(&written.expr)?;
         let mut reads = Reads {

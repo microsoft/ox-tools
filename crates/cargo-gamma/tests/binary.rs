@@ -20,6 +20,8 @@
 use std::process::{Command, Output};
 
 use cargo_gamma_lib::internals::commands::{EXIT_OK, EXIT_USAGE};
+#[cfg(feature = "system-tests")]
+use cargo_gamma_lib::testing::private_system_tempdir;
 use cargo_gamma_lib::testing::{workdir, write_project};
 
 /// Runs the built executable with `arguments` and returns everything the process produced.
@@ -119,4 +121,57 @@ fn the_installed_binary_preserves_rustc_wrapper_status() {
 
     assert_eq!(code(&success), 0);
     assert_eq!(code(&failure), 7);
+}
+
+#[test]
+#[cfg(feature = "system-tests")]
+fn the_compiler_wrapper_caps_warnings_after_ancestor_target_flags_without_losing_them() {
+    let directory = private_system_tempdir("gamma-ancestor-lint-cap-");
+    let root = directory.path().join("workspace");
+    std::fs::create_dir_all(root.join(".cargo")).unwrap();
+    std::fs::create_dir_all(directory.path().join(".cargo")).unwrap();
+    write_project(
+        &root,
+        &[(
+            "src/lib.rs",
+            "#[cfg(not(gamma_ancestor))]\ncompile_error!(\"ancestor flags were lost\");\npub fn value() -> u32 { if (true) { 1 } else { 2 } }\n",
+        )],
+    );
+    std::fs::write(
+        directory.path().join(".cargo").join("config.toml"),
+        "[target.'cfg(all())']\nrustflags = ['--cfg=gamma_ancestor', '--check-cfg=cfg(gamma_ancestor)', '-Dwarnings']\n",
+    )
+    .unwrap();
+    std::fs::write(
+        root.join(".cargo").join("config.toml"),
+        "[build]\nrustflags = ['--cap-lints=allow']\n",
+    )
+    .unwrap();
+    let mut cargo = Command::new(env!("CARGO"));
+    cargo
+        .current_dir(&root)
+        .args(["check", "--offline"])
+        .env("CARGO_TARGET_DIR", directory.path().join("target"))
+        .env("CARGO_HOME", directory.path().join("cargo-home"))
+        .env("RUSTC_WRAPPER", "")
+        .env_remove("RUSTC_WORKSPACE_WRAPPER")
+        .env_remove("RUSTFLAGS")
+        .env_remove("CARGO_ENCODED_RUSTFLAGS")
+        .env_remove("CARGO_BUILD_RUSTFLAGS")
+        .env_remove("CARGO_GAMMA_RUSTC_CAPTURE_DIR")
+        .env_remove("CARGO_GAMMA_ORIGINAL_RUSTC_WRAPPER")
+        .env_remove("CARGO_GAMMA_CAP_LINTS");
+    let uncapped = cargo.output().unwrap();
+    assert!(
+        !uncapped.status.success(),
+        "target flags must override the build-table cap: {}",
+        String::from_utf8_lossy(&uncapped.stderr)
+    );
+    assert!(String::from_utf8_lossy(&uncapped.stderr).contains("unused_parens"));
+    let capped = cargo
+        .env("RUSTC_WRAPPER", env!("CARGO_BIN_EXE_cargo-gamma"))
+        .env("CARGO_GAMMA_CAP_LINTS", "1")
+        .output()
+        .unwrap();
+    assert!(capped.status.success(), "{}", String::from_utf8_lossy(&capped.stderr));
 }

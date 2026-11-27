@@ -3,15 +3,16 @@
 
 //! Walking the workspace to decide which files to parse and which mutants to plan.
 
+use core::any::type_name;
 use core::iter::once;
-use core::mem;
 use core::num::{NonZero, NonZeroU32};
 use core::panic::AssertUnwindSafe;
 use core::sync::atomic::{AtomicUsize, Ordering};
+use core::{fmt, mem};
 use std::ffi::OsStr;
 use std::panic::{catch_unwind, resume_unwind};
-use std::sync::{Barrier, Mutex, OnceLock, PoisonError};
-use std::thread;
+use std::sync::{Barrier, Mutex, OnceLock, PoisonError, mpsc};
+use std::{fs, thread};
 
 use camino::{Utf8Path, Utf8PathBuf};
 use cargo_metadata::{CargoOpt, Metadata, MetadataCommand, Target, TargetKind};
@@ -32,6 +33,7 @@ use crate::model::{Channel, Interner, Mutant, MutantId, Outcome, Suppression};
 use crate::ops::collect;
 use crate::ops::registry::Selection;
 use crate::parse::SourceFile;
+use crate::report::encode_controls;
 use crate::{HashMap, HashSet, Result, suppress};
 
 #[cfg(test)]
@@ -105,7 +107,6 @@ fn plan_survey(survey: Survey, selection: &Selection, notify: &mut impl FnMut(&s
 /// call and a directory walk; parsing them costs far more. Splitting the two lets a run copy the
 /// workspace and then scan, instrument and build one package at a time, rather than parsing
 /// everything before anything else can start.
-#[derive(Debug)]
 pub struct Survey {
     /// Absolute path of the workspace root.
     pub root: Utf8PathBuf,
@@ -122,6 +123,7 @@ pub struct Survey {
     /// Excluded files still supply module declarations and `Default` implementations, so the
     /// evidence graph must be wider than the mutation population.
     declaration_files: HashMap<String, Vec<Utf8PathBuf>>,
+    declaration_cache: DeclarationCache,
 
     /// For each workspace package, the workspace packages its test binaries can reach.
     pub reach: HashMap<String, HashSet<String>>,
@@ -212,6 +214,21 @@ pub struct Survey {
     only_mutants: Option<HashSet<MutantId>>,
     settled: HashMap<MutantId, super::Settled>,
     exclude_trait_impls: Vec<String>,
+}
+
+impl fmt::Debug for Survey {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct(type_name::<Self>())
+            .field("root", &self.root)
+            .field("target", &self.target)
+            .field("files", &self.files.len())
+            .field("declaration_packages", &self.declaration_files.len())
+            .field("selected_packages", &self.selected.len())
+            .field("tests", &self.tests.len())
+            .field("source_directories", &self.source_dirs.len())
+            .field("external_inputs", &self.external_inputs.len())
+            .finish_non_exhaustive()
+    }
 }
 
 /// What scanning some part of the workspace yielded.
@@ -336,7 +353,7 @@ impl Survey {
         let metadata = load_survey_metadata_using(&args.dir, &features, cache_inputs, MetadataCommand::exec)?;
         let root = Utf8PathBuf::from(metadata.workspace_root.as_str());
         let external_inputs = if cache_inputs {
-            external_path_inputs(&args.dir, &features, &root)?
+            external_path_inputs_from_metadata(&metadata, &root)?
         } else {
             ExternalPathInputs::default()
         };
@@ -430,6 +447,7 @@ impl Survey {
         let mut roots: HashMap<String, Vec<Utf8PathBuf>> = HashMap::default();
         let mut specs: HashMap<String, (Utf8PathBuf, String)> = HashMap::default();
         let mut source_dirs: HashSet<Utf8PathBuf> = HashSet::default();
+        let mut directory_files: HashMap<Utf8PathBuf, Vec<Utf8PathBuf>> = HashMap::default();
 
         let mut diff = args.in_diff.as_ref().map(|path| read_diff(path)).transpose()?;
         let patterns = FilePatterns::new(args);
@@ -539,8 +557,12 @@ impl Survey {
                     continue;
                 };
 
-                for absolute in walk(directory, &[])? {
-                    let relative = placed_under(&root, &absolute, &package.name)?;
+                if !directory_files.contains_key(directory) {
+                    let found = walk(directory, &[])?;
+                    let _previous = directory_files.insert(directory.to_owned(), found);
+                }
+                for absolute in &directory_files[directory] {
+                    let relative = placed_under(&root, absolute, &package.name)?;
 
                     // #[gamma::skip(all, reason = "widening this internal validation list only adds unused entries or duplicate syntax trees to an idempotent name set")]
                     if checking_exclusions && exclusion_seen.insert((absolute.clone(), package.name.to_string())) {
@@ -588,7 +610,7 @@ impl Survey {
 
                     files.push(TargetFile {
                         path: relative,
-                        absolute,
+                        absolute: absolute.clone(),
                         package: package.name.to_string(),
                         source: None,
                     });
@@ -613,7 +635,10 @@ impl Survey {
         if let Some(diff) = diff.as_mut() {
             walked.sort();
             walked.dedup();
-            diff.resolve(&root, &walked)?;
+            let package_directories: Vec<Utf8PathBuf> = specs.values().map(|(directory, _version)| directory.clone()).collect();
+            diff.resolve_for_workspace(&root, &walked, &package_directories, || {
+                declared_module_targets(&declaration_files, &roots, &cfgs)
+            })?;
 
             // A file the diff does not mention cannot contain a changed line, so it is dropped
             // before it is parsed rather than after, which is most of what makes `--in-diff` fast
@@ -639,6 +664,7 @@ impl Survey {
             target,
             files,
             declaration_files,
+            declaration_cache: Mutex::default(),
             by_package,
             reach: reachable(metadata),
             selected: sorted(selected),
@@ -674,6 +700,10 @@ impl Survey {
     /// see is wrong.
     #[must_use]
     pub fn killers(&self) -> Killers {
+        self.killers_with_reader(|path| fs::read(path))
+    }
+
+    fn killers_with_reader(&self, read: impl FnMut(&Utf8Path) -> std::io::Result<Vec<u8>>) -> Killers {
         let mut files = Vec::new();
         let mut complete = true;
 
@@ -688,7 +718,9 @@ impl Survey {
             }
         }
 
-        Killers::scan_complete(&files, complete)
+        files.sort();
+        files.dedup();
+        Killers::scan_complete_with(&files, complete, read)
     }
 
     /// Local path dependency roots a cache snapshot must include.
@@ -842,7 +874,7 @@ impl Survey {
             mut digests,
             sources,
             evidence_digests,
-        } = scan_with_dependencies(
+        } = scan_with_declarations(
             &files,
             &declaration_files,
             &roots,
@@ -850,6 +882,9 @@ impl Survey {
             &self.cfgs,
             &self.exclude_trait_impls,
             &self.resource_dependencies,
+            |files| cached_declarations(&self.declaration_cache, files),
+            Some(&self.declaration_cache),
+            |_worker| Ok(()),
         )?;
         for (absolute, digest) in evidence_digests {
             let relative = placed_under(&self.root, &absolute, "resource evidence")?;
@@ -1263,6 +1298,8 @@ fn scan_with_dependencies(
         exclude_trait_impls,
         resource_dependencies,
         parse_declarations_parallel,
+        None,
+        |_worker| Ok(()),
     )
 }
 
@@ -1279,6 +1316,8 @@ fn scan_with_declarations(
     exclude_trait_impls: &[String],
     resource_dependencies: &[super::resource_dependencies::Dependency],
     declarations: impl FnOnce(&[(&Utf8Path, &CfgSet, &str)]) -> Result<Declarations>,
+    cache: Option<&DeclarationCache>,
+    admit: impl FnMut(usize) -> std::io::Result<()>,
 ) -> Result<Scan> {
     let selected: HashSet<&Utf8Path> = files.iter().map(|file| file.absolute.as_path()).collect();
     let mut extra_decl_files: Vec<(&Utf8Path, &CfgSet, &str)> = declaration_files
@@ -1297,37 +1336,31 @@ fn scan_with_declarations(
     } = declarations(&extra_decl_files)?;
 
     // #[gamma::skip(all, reason = "the worker count is a positive resource bound; changing it either preserves results while changing scheduling or violates that bound")]
-    let workers = thread::available_parallelism().map_or(1, NonZero::get).min(files.len().max(1));
+    let workers = thread::available_parallelism()
+        .unwrap_or(NonZero::<usize>::MIN)
+        .min(NonZero::new(files.len()).unwrap_or(NonZero::<usize>::MIN));
     let shared = Shared {
         next: AtomicUsize::new(0),
         partials: Mutex::new(vec![extra_defaults]),
         skipped: Mutex::new(Vec::new()),
-        barrier: Barrier::new(workers),
+        barrier: Barrier::new(workers.get()),
         defaults: OnceLock::new(),
         incomplete_packages: &incomplete_packages,
         named: Mutex::new(extra_named),
         roots,
         resource_dependencies,
+        cache,
     };
 
-    let mut collected: Vec<(usize, Parsed)> = thread::scope(|scope| {
-        // #[gamma::skip(all, reason = "spawning a different number of workers than the fixed barrier party count deadlocks discovery")]
-        let handles: Vec<_> = (0..workers)
-            .map(|_worker| {
-                let shared = &shared;
-
-                scope.spawn(move || work(files, shared, selection, cfgs, exclude_trait_impls))
-            })
-            .collect();
-
+    let mut collected: Vec<(usize, Parsed)> = {
         let mut collected = Vec::new();
         let mut failure: Option<(usize, Error)> = None;
 
-        for handle in handles {
+        for result in run_workers(workers, |_worker| work(files, &shared, selection, cfgs, exclude_trait_impls), admit)? {
             // A panic in a worker is a bug in this crate, not something a user can act on, so it
             // is propagated rather than turned into a diagnostic that blames their code. It can
             // only get here because the worker held it until both barriers were behind it.
-            match handle.join().unwrap_or_else(|payload| resume_unwind(payload)) {
+            match result {
                 Ok(mine) => collected.extend(mine),
 
                 // Several files can be unreadable or unparseable at once, and which worker noticed
@@ -1339,11 +1372,11 @@ fn scan_with_declarations(
             }
         }
 
-        match failure {
-            Some((_at, error)) => Err(error),
-            None => Ok(collected),
+        if let Some((_at, error)) = failure {
+            return Err(error);
         }
-    })?;
+        collected
+    };
 
     collected.sort_by_key(|(index, _parsed)| *index);
 
@@ -1363,8 +1396,10 @@ fn scan_with_declarations(
 
     // Dependency roots supply proof evidence, not population membership. Only mutation
     // packages may make reachable source live during module-exclusion analysis.
-    let population_roots = population_roots(files, declaration_files, roots);
-    let excluded = modules::excluded_files(&population_roots, &declared);
+    let mut identities = HashMap::default();
+    let mut identity = |path: &Utf8Path| identities.entry(path.to_owned()).or_insert_with(|| modules::identity(path)).clone();
+    let population_roots = population_roots(files, declaration_files, roots, &mut identity);
+    let excluded = modules::excluded_files_with(&population_roots, &declared, &mut identity);
     let total = collected.iter().map(|(_index, parsed)| parsed.mutants.len()).sum();
     let mut mutants = Vec::with_capacity(total);
     let mut digests: HashMap<Utf8PathBuf, String> = HashMap::default();
@@ -1372,10 +1407,7 @@ fn scan_with_declarations(
     let mut idle = Vec::new();
 
     for (index, parsed) in collected {
-        if files
-            .get(index)
-            .is_some_and(|file| excluded.contains(&modules::identity(&file.absolute)))
-        {
+        if files.get(index).is_some_and(|file| excluded.contains(&identity(&file.absolute))) {
             continue;
         }
 
@@ -1416,20 +1448,21 @@ fn scan_with_declarations(
     })
 }
 
-fn population_roots(files: &[&TargetFile], declaration_files: &[(&Utf8Path, &CfgSet, &str)], roots: &[Utf8PathBuf]) -> Vec<Utf8PathBuf> {
+fn population_roots(
+    files: &[&TargetFile],
+    declaration_files: &[(&Utf8Path, &CfgSet, &str)],
+    roots: &[Utf8PathBuf],
+    mut identity: impl FnMut(&Utf8Path) -> Utf8PathBuf,
+) -> Vec<Utf8PathBuf> {
     let mutation_packages: HashSet<&str> = files.iter().map(|file| file.package.as_str()).collect();
-    roots
-        .iter()
-        .filter(|root| {
-            files
-                .iter()
-                .any(|file| modules::identity(&file.absolute) == modules::identity(root))
-                || declaration_files
-                    .iter()
-                    .any(|(path, _cfg, package)| modules::identity(path) == modules::identity(root) && mutation_packages.contains(package))
-        })
-        .cloned()
-        .collect()
+    let mut identities: HashSet<Utf8PathBuf> = files.iter().map(|file| identity(&file.absolute)).collect();
+    identities.extend(
+        declaration_files
+            .iter()
+            .filter(|(_path, _cfg, package)| mutation_packages.contains(package))
+            .map(|(path, _cfg, _package)| identity(path)),
+    );
+    roots.iter().filter(|root| identities.contains(&identity(root))).cloned().collect()
 }
 
 fn retain_first_failure(failure: &mut Option<(usize, Error)>, at: usize, error: Error) {
@@ -1439,6 +1472,49 @@ fn retain_first_failure(failure: &mut Option<(usize, Error)>, at: usize, error: 
     {
         *failure = Some((at, error));
     }
+}
+
+/// Admits the whole pool before any worker runs, protecting scan barriers sized for that pool.
+///
+/// Failed or interrupted admission releases every spawned worker without running its task.
+fn run_workers<T: Send>(
+    workers: NonZero<usize>,
+    run: impl Fn(usize) -> T + Sync,
+    mut admit: impl FnMut(usize) -> std::io::Result<()>,
+) -> Result<Vec<T>> {
+    let workers = workers.get();
+    thread::scope(|scope| {
+        let mut handles = Vec::with_capacity(workers);
+        let mut starters = Vec::with_capacity(workers);
+        let mut failure = None;
+        for worker in 0..workers {
+            let run = &run;
+            let (start, ready) = mpsc::channel::<bool>();
+            let spawned = admit(worker)
+                .and_then(|()| thread::Builder::new().spawn_scoped(scope, move || ready.recv().unwrap_or(false).then(|| run(worker))));
+            match spawned {
+                Ok(handle) => {
+                    handles.push(handle);
+                    starters.push(start);
+                }
+                Err(error) => {
+                    failure = Some(error);
+                    break;
+                }
+            }
+        }
+        for start in starters {
+            let _delivered = start.send(failure.is_none());
+        }
+        let results = handles
+            .into_iter()
+            .filter_map(|handle| handle.join().unwrap_or_else(|payload| resume_unwind(payload)))
+            .collect();
+        match failure {
+            Some(cause) => Err(error!("could not start a discovery worker").caused_by(cause)),
+            None => Ok(results),
+        }
+    })
 }
 
 fn diff_extent(line: usize, end_line: usize) -> (u32, u32) {
@@ -1454,7 +1530,7 @@ const fn next_discovery_index(index: u32) -> u32 {
 type DeclarationParse = (usize, Result<DeclarationOutcome>);
 
 /// What parsing one declaration-only file yielded: its declarations, or the reason it was skipped.
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub enum DeclarationOutcome {
     /// The file parsed, and declares these modules.
     Declared(
@@ -1467,6 +1543,45 @@ pub enum DeclarationOutcome {
 
     /// The file could not be analyzed, and this diagnostic names it and says why.
     Skipped(Utf8PathBuf, String),
+}
+
+// Parsing and digest validation stay outside the lock. Only complete outcomes are published,
+// so poison recovery cannot expose a partially updated declaration entry.
+type DeclarationCache = Mutex<HashMap<(Utf8PathBuf, String), DeclarationOutcome>>;
+
+#[ohno::error]
+#[display("source `{path}` no longer matches cached declaration evidence")]
+struct SourceChanged {
+    path: Utf8PathBuf,
+}
+
+fn cached_declarations(cache: &DeclarationCache, files: &[(&Utf8Path, &CfgSet, &str)]) -> Result<Declarations> {
+    cached_declarations_with(cache, files, parse_declarations_of)
+}
+
+fn cached_declarations_with(
+    cache: &DeclarationCache,
+    files: &[(&Utf8Path, &CfgSet, &str)],
+    parse: impl Fn(&Utf8Path, &CfgSet) -> Result<DeclarationOutcome> + Sync,
+) -> Result<Declarations> {
+    parse_declarations_with_workers(
+        files,
+        thread::available_parallelism,
+        |path, cfg, package| {
+            let key = (path.to_owned(), package.to_owned());
+            let cached = cache.lock().unwrap_or_else(PoisonError::into_inner).get(&key).cloned();
+            if let Some(outcome) = cached {
+                return Ok(outcome);
+            }
+            let outcome = parse(path, cfg)?;
+            if matches!(outcome, DeclarationOutcome::Declared(..)) {
+                let stored = outcome.clone();
+                let _previous = cache.lock().unwrap_or_else(PoisonError::into_inner).insert(key, stored);
+            }
+            Ok(outcome)
+        },
+        |_| Ok(()),
+    )
 }
 
 /// Declarations gathered from files outside the selection, with the ones that could not be read.
@@ -1513,15 +1628,15 @@ pub fn parse_declarations_with_parser(
     parallelism: impl FnOnce() -> std::io::Result<NonZero<usize>>,
     parse: impl Fn(&Utf8Path, &CfgSet) -> Result<DeclarationOutcome> + Sync,
 ) -> Result<Declarations> {
-    parse_declarations_with_workers(files, parallelism, parse, |_| {})
+    parse_declarations_with_workers(files, parallelism, |path, cfg, _package| parse(path, cfg), |_| Ok(()))
 }
 
 /// Reports admission before each spawn, without requiring parser callbacks to rendezvous.
 fn parse_declarations_with_workers(
     files: &[(&Utf8Path, &CfgSet, &str)],
     parallelism: impl FnOnce() -> std::io::Result<NonZero<usize>>,
-    parse: impl Fn(&Utf8Path, &CfgSet) -> Result<DeclarationOutcome> + Sync,
-    mut worker_started: impl FnMut(usize),
+    parse: impl Fn(&Utf8Path, &CfgSet, &str) -> Result<DeclarationOutcome> + Sync,
+    admit: impl FnMut(usize) -> std::io::Result<()>,
 ) -> Result<Declarations> {
     if files.is_empty() {
         return Ok(Declarations {
@@ -1543,48 +1658,37 @@ fn parse_declarations_with_workers(
     let results: Vec<DeclarationParse> = if workers <= 1 {
         let mut results = Vec::with_capacity(files.len());
 
-        for (index, &(path, cfg, _package)) in files.iter().enumerate() {
-            results.push((index, parse(path, cfg)));
+        for (index, &(path, cfg, package)) in files.iter().enumerate() {
+            results.push((index, parse(path, cfg, package)));
         }
 
         results
     } else {
         let next = AtomicUsize::new(0);
 
-        thread::scope(|scope| {
-            let handles: Vec<_> = declaration_worker_indices(workers)
-                .map(|worker| {
-                    worker_started(worker);
-                    let next = &next;
-                    let parse = &parse;
+        run_workers(
+            NonZero::new(workers).expect("the parallel declaration branch requires more than one worker"),
+            |_worker| {
+                let mut mine = Vec::new();
 
-                    scope.spawn(move || {
-                        let mut mine = Vec::new();
+                loop {
+                    // #[gamma::skip(literal.int_decrement, tag = "outofmemory", reason = "a zero atomic increment repeatedly parses and accumulates the same file")]
+                    let index = next.fetch_add(1, Ordering::Relaxed);
+                    let Some(&(path, cfg, package)) = files.get(index) else {
+                        // #[gamma::skip(loop.break_to_continue, tag = "timeout", reason = "workers must exit after exhausting the finite file list")]
+                        break;
+                    };
 
-                        loop {
-                            // #[gamma::skip(literal.int_decrement, tag = "outofmemory", reason = "a zero atomic increment repeatedly parses and accumulates the same file")]
-                            let index = next.fetch_add(1, Ordering::Relaxed);
-                            let Some(&(path, cfg, _package)) = files.get(index) else {
-                                // #[gamma::skip(loop.break_to_continue, tag = "timeout", reason = "workers must exit after exhausting the finite file list")]
-                                break;
-                            };
+                    mine.push((index, parse(path, cfg, package)));
+                }
 
-                            mine.push((index, parse(path, cfg)));
-                        }
-
-                        mine
-                    })
-                })
-                .collect();
-
-            let mut all = Vec::new();
-
-            for handle in handles {
-                all.extend(handle.join().unwrap_or_else(|payload| resume_unwind(payload)));
-            }
-
-            all
-        })
+                mine
+            },
+            admit,
+        )?
+        .into_iter()
+        .flatten()
+        .collect()
     };
 
     gather_declarations(files, results)
@@ -1625,10 +1729,6 @@ fn gather_declarations(files: &[(&Utf8Path, &CfgSet, &str)], mut results: Vec<De
     Ok(gathered)
 }
 
-fn declaration_worker_indices(workers: usize) -> core::ops::Range<usize> {
-    0..workers
-}
-
 /// Reads one declaration-only file, turning a skippable failure into a named skip.
 pub fn parse_declarations_of(path: &Utf8Path, cfg: &CfgSet) -> Result<DeclarationOutcome> {
     parse_declarations_with(path, cfg, module_identities::declarations)
@@ -1640,18 +1740,27 @@ fn parse_declarations_with(
     declarations: impl FnOnce(&Utf8Path, &syn::File, &CfgSet) -> Result<Vec<module_identities::Edge>>,
 ) -> Result<DeclarationOutcome> {
     match SourceFile::read(path) {
-        Ok(source) => Ok(DeclarationOutcome::Declared(
-            path.to_owned(),
-            modules::declarations(path, source.ast(), cfg),
-            Box::new(collect::Defaults::of_source_in(source.ast(), cfg, path.as_str())),
-            declarations(path, source.ast(), cfg)?,
-            crate::discover::digest(retained_source(&source).as_bytes()),
-        )),
+        Ok(source) => declaration_of_source(path, &source, cfg, declarations),
 
         Err(error) if error.is_skippable() => Ok(DeclarationOutcome::Skipped(path.to_owned(), error.to_string())),
 
         Err(error) => Err(error.into()),
     }
+}
+
+fn declaration_of_source(
+    path: &Utf8Path,
+    source: &SourceFile,
+    cfg: &CfgSet,
+    declarations: impl FnOnce(&Utf8Path, &syn::File, &CfgSet) -> Result<Vec<module_identities::Edge>>,
+) -> Result<DeclarationOutcome> {
+    Ok(DeclarationOutcome::Declared(
+        path.to_owned(),
+        modules::declarations(path, source.ast(), cfg),
+        Box::new(collect::Defaults::of_source_in(source.ast(), cfg, path.as_str())),
+        declarations(path, source.ast(), cfg)?,
+        crate::discover::digest(source.text().as_bytes()),
+    ))
 }
 
 /// What parsing and mutating a set of files produced before population filters.
@@ -1668,6 +1777,7 @@ pub struct Scan {
 /// Everything the workers of one scan share, so that adding a channel does not widen every
 /// signature between here and the loop that uses it.
 struct Shared<'a> {
+    cache: Option<&'a DeclarationCache>,
     resource_dependencies: &'a [super::resource_dependencies::Dependency],
     named: Mutex<Vec<(Utf8PathBuf, Vec<module_identities::Edge>)>>,
     roots: &'a [Utf8PathBuf],
@@ -1728,7 +1838,35 @@ impl Shared<'_> {
     }
 }
 
-/// What one file yielded when it was parsed.
+fn selected_declarations(
+    file: &TargetFile,
+    source: &SourceFile,
+    cfg: &CfgSet,
+    cache: Option<&DeclarationCache>,
+) -> Result<DeclarationOutcome> {
+    let key = (file.absolute.clone(), file.package.clone());
+    let cached = cache.and_then(|cache| cache.lock().unwrap_or_else(PoisonError::into_inner).get(&key).cloned());
+    let outcome = match cached {
+        Some(outcome @ DeclarationOutcome::Declared(..)) => {
+            let DeclarationOutcome::Declared(_, _, _, _, digest) = &outcome else {
+                unreachable!("the enclosing match accepts only declared outcomes");
+            };
+            return if *digest == crate::discover::digest(source.text().as_bytes()) {
+                Ok(outcome)
+            } else {
+                Err(error!("source `{}` changed during discovery; retry the campaign", file.path)
+                    .caused_by(SourceChanged::new(file.path.clone())))
+            };
+        }
+        _ => declaration_of_source(&file.absolute, source, cfg, module_identities::declarations)?,
+    };
+    if let Some(cache) = cache {
+        let stored = outcome.clone();
+        let _previous = cache.lock().unwrap_or_else(PoisonError::into_inner).insert(key, stored);
+    }
+    Ok(outcome)
+}
+
 /// One survey worker: parses whatever files it can claim, then mutates the ones it parsed.
 ///
 /// Split out of `scan` because it is the whole of a worker's life and reads better whole, and
@@ -1782,9 +1920,13 @@ fn work(
                     // and what a suppression or an expectation is keyed by.
                     source.set_path(file.path.clone());
                     let cfg = cfgs.for_package(&file.package);
-                    let defaults = collect::Defaults::of_source_in(source.ast(), cfg, file.absolute.as_str());
-                    let declarations = match module_identities::declarations(&file.absolute, source.ast(), cfg) {
-                        Ok(declarations) => declarations,
+                    let (defaults, declarations) = match selected_declarations(file, &source, cfg, shared.cache) {
+                        Ok(outcome) => {
+                            let DeclarationOutcome::Declared(_, _, defaults, declarations, _) = outcome else {
+                                unreachable!("declaration_of_source receives a successfully parsed source");
+                            };
+                            (*defaults, declarations)
+                        }
                         Err(error) => {
                             failure = Some((at, error));
                             break;
@@ -2252,6 +2394,96 @@ fn placed_under(root: &Utf8Path, absolute: &Utf8Path, package: &str) -> Result<U
     Ok(Utf8PathBuf::from(normalize_separators(inside.as_str())))
 }
 
+/// Module targets from the declaration inventory, if the inventory provides complete evidence.
+fn declared_module_targets(
+    declaration_files: &HashMap<String, Vec<Utf8PathBuf>>,
+    roots: &HashMap<String, Vec<Utf8PathBuf>>,
+    cfgs: &Cfgs,
+) -> Result<HashSet<Utf8PathBuf>> {
+    let files: Vec<(&Utf8Path, &CfgSet, &str)> = declaration_files
+        .iter()
+        .flat_map(|(package, paths)| {
+            let cfg = cfgs.for_package(package);
+            paths.iter().map(move |path| (path.as_path(), cfg, package.as_str()))
+        })
+        .collect();
+
+    let roots: Vec<_> = roots.values().flatten().cloned().collect();
+    module_targets_from(
+        &roots,
+        parse_declarations_with_parser(&files, thread::available_parallelism, parse_declarations_for_ownership)?,
+    )
+}
+
+fn parse_declarations_for_ownership(path: &Utf8Path, cfg: &CfgSet) -> Result<DeclarationOutcome> {
+    parse_declarations_with(path, cfg, ownership_edges)
+}
+
+fn ownership_edges(path: &Utf8Path, ast: &syn::File, cfg: &CfgSet) -> Result<Vec<module_identities::Edge>> {
+    if modules::has_conditional_path(&ast.items) {
+        return Err(error!(
+            "cannot prove that a standalone Rust diff path is unowned: `{}` has a module with a conditional `#[path]` that gamma cannot resolve",
+            encode_controls(path.as_str())
+        )
+        .usage());
+    }
+
+    if let Some(module) = modules::block_local_module(ast) {
+        return Err(error!(
+            "cannot prove that a standalone Rust diff path is unowned: `{}` declares `mod {module};` inside a block; \
+             gamma cannot resolve its source path there",
+            encode_controls(path.as_str())
+        )
+        .usage());
+    }
+
+    if modules::has_include(ast) {
+        return Err(error!(
+            "cannot prove that a standalone Rust diff path is unowned: `{}` uses `include!`, whose source path gamma does not resolve",
+            encode_controls(path.as_str())
+        )
+        .usage());
+    }
+
+    module_identities::declarations(path, ast, cfg)
+}
+
+fn module_targets_from(roots: &[Utf8PathBuf], declarations: Declarations) -> Result<HashSet<Utf8PathBuf>> {
+    if !declarations.skipped.is_empty() {
+        let skipped = declarations
+            .skipped
+            .iter()
+            .map(|(path, reason)| format!("{}: {reason}", encode_controls(path.as_str())))
+            .collect::<Vec<_>>()
+            .join(", ");
+
+        return Err(error!(
+            "cannot prove that a standalone Rust diff path is unowned because declaration analysis was incomplete ({skipped})"
+        )
+        .usage());
+    }
+
+    let inventory: HashSet<_> = declarations.declared.iter().map(|(path, _)| modules::identity(path)).collect();
+    let excluded = modules::excluded_files(roots, &declarations.declared);
+    let mut targets = HashSet::default();
+    for (source, edges) in declarations.declared {
+        for edge in edges {
+            let target = modules::identity(&edge.target);
+            if !inventory.contains(&target) && !excluded.contains(&target) {
+                return Err(error!(
+                    "cannot prove that a standalone Rust diff path is unowned: `{}` declares module file `{}`, \
+                     which is outside the declaration inventory",
+                    encode_controls(source.as_str()),
+                    encode_controls(target.as_str())
+                )
+                .usage());
+            }
+            let _inserted = targets.insert(target);
+        }
+    }
+    Ok(targets)
+}
+
 /// Loads cargo metadata for the tree at `dir`.
 ///
 /// The feature selection has to match the one the build will use. Metadata decides which targets
@@ -2318,19 +2550,19 @@ fn load_survey_metadata_using(
     cache_inputs: bool,
     read: impl FnOnce(&MetadataCommand) -> std::result::Result<Metadata, cargo_metadata::Error>,
 ) -> Result<Metadata> {
-    if cache_inputs {
-        return load_metadata_using(dir, features, read);
-    }
-
     let mut command = MetadataCommand::new();
-    let _builder = command.current_dir(dir).other_options(vec!["--offline".to_owned()]);
+    let _builder = command.current_dir(dir);
+    if !cache_inputs {
+        let _builder = command.other_options(vec!["--offline".to_owned()]);
+    }
 
     apply_metadata_features(&mut command, features);
 
     read(&command).map_err(|cause| {
         error!(
-            "could not resolve resource dependencies for `{dir}` using offline Cargo metadata; \
-             run `cargo metadata` and `cargo fetch` in that workspace, then retry"
+            "could not resolve resource dependencies for `{dir}` using {}Cargo metadata; \
+             run `cargo metadata` and `cargo fetch` in that workspace, then retry",
+            if cache_inputs { "" } else { "offline " }
         )
         .caused_by(cause)
     })
@@ -2398,14 +2630,13 @@ fn apply_metadata_features(command: &mut MetadataCommand, features: &FeatureArgs
 
 /// Finds local packages Cargo resolves outside the workspace root.
 ///
-/// Cache-enabled discovery first loads workspace targets with `--no-deps`. Its provenance pass
-/// also resolves the complete dependency graph: a path dependency's
+/// Discovery reuses its complete dependency graph: a path dependency's
 /// source is a filesystem input even though it is not a workspace target and can change without a
 /// workspace file moving. Registry and git packages are identified by their locked source and are
 /// covered by the lockfile; only local packages have no source identifier to carry that change.
 /// Build scripts are different: any package's script can read arbitrary paths that metadata does
 /// not enumerate, so their presence makes a snapshot incomplete.
-// #[gamma::skip(all, reason = "external path-root filtering, normalization, and deduplication depend on Cargo metadata and physical filesystem identity; integration fixtures cover the resulting root set")]
+#[cfg(test)]
 fn external_path_inputs(dir: &Utf8Path, features: &FeatureArgs, root: &Utf8Path) -> Result<ExternalPathInputs> {
     let mut command = MetadataCommand::new();
     let _builder = command.current_dir(dir);
@@ -2414,12 +2645,16 @@ fn external_path_inputs(dir: &Utf8Path, features: &FeatureArgs, root: &Utf8Path)
     let metadata = command
         .exec()
         .map_err(|cause| error!("could not read the external Cargo inputs for `{dir}`").caused_by(cause))?;
-    let resource_dependencies = super::resource_dependencies::of(&metadata);
+    external_path_inputs_from_metadata(&metadata, root)
+}
+
+fn external_path_inputs_from_metadata(metadata: &Metadata, root: &Utf8Path) -> Result<ExternalPathInputs> {
+    let resource_dependencies = super::resource_dependencies::of(metadata);
     let workspace = crate::paths::physical(root)?;
     let mut roots = Vec::new();
     let mut has_build_scripts = false;
 
-    for package in metadata.packages {
+    for package in &metadata.packages {
         has_build_scripts |= package.targets.iter().any(|target| target.kind.contains(&TargetKind::CustomBuild));
 
         if package.source.is_some() {
@@ -2777,7 +3012,8 @@ fn walk_rust_files_excluding(directory: &Utf8Path, excluded: &[Utf8PathBuf]) -> 
 #[cfg(not(miri))]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
-    use std::fs;
+    use core::error::Error as _;
+    use std::ffi::OsString;
     #[cfg(unix)]
     use std::os::unix::ffi::OsStringExt as _;
     #[cfg(windows)]
@@ -2822,6 +3058,42 @@ mod tests {
             |_, _, _| Ok(()),
             read_diff,
         )
+    }
+
+    #[test]
+    fn a_survey_skips_an_external_script_only_when_it_is_unowned() {
+        let root = Utf8Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/standalone-diff");
+        let mut metadata = selection_metadata();
+        metadata.workspace_root = root.clone();
+        metadata.workspace_members.truncate(1);
+        metadata.packages.truncate(1);
+        let args = SelectArgs {
+            dir: root.clone(),
+            workspace: true,
+            in_diff: Some("script.patch".into()),
+            ..SelectArgs::default()
+        };
+        let mut survey = |package: &str| {
+            metadata.packages[0].manifest_path = root.join(package).join("Cargo.toml");
+            metadata.packages[0].targets.truncate(1);
+            metadata.packages[0].targets[0].src_path = root.join(package).join("lib.rs");
+            inventory_survey(&metadata, &args, walk_rust_files_excluding, |_| {
+                Ok(Diff::parse("--- script.rs\n+++ script.rs\n@@ -0,0 +1 @@\n+pub fn work() {}\n"))
+            })
+        };
+
+        assert!(survey("unowned").unwrap().files.is_empty());
+        let failure = survey("owned").unwrap_err();
+        assert!(failure.is_usage(), "{failure}");
+        let owner = root.join("owned").join("lib.rs");
+        let script = root.join("script.rs").canonicalize_utf8().unwrap();
+        assert_eq!(
+            failure.message(),
+            format!(
+                "cannot prove that a standalone Rust diff path is unowned: `{owner}` declares module file `{script}`, \
+                 which is outside the declaration inventory"
+            )
+        );
     }
 
     #[test]
@@ -2990,6 +3262,10 @@ mod tests {
     }
 
     #[test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "One fixture checks mutation, test, example, and build-script inventories against the same diff."
+    )]
     fn diff_recognizes_nonmutated_targets_and_their_helpers_without_mutating_them() {
         let mut metadata = selection_metadata();
         let package = &mut metadata.packages[0];
@@ -3065,8 +3341,11 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            directories,
-            ["src", "src", "tests", "examples", ""].map(|directory| Utf8Path::new("C:/fixture/alpha").join(directory))
+            directories
+                .iter()
+                .map(|directory| directory.strip_prefix("C:/fixture/alpha").unwrap())
+                .collect::<Vec<_>>(),
+            ["src", "tests", "examples", ""].map(Utf8Path::new)
         );
         assert_eq!(
             survey.files.iter().map(|file| file.path.as_str()).collect::<Vec<_>>(),
@@ -3149,10 +3428,7 @@ mod tests {
             Diff::read,
         )
         .unwrap();
-        assert_eq!(
-            directories,
-            ["C:/fixture/alpha/src", "C:/fixture/alpha/src", "C:/fixture/beta/src"].map(Utf8PathBuf::from)
-        );
+        assert_eq!(directories, ["C:/fixture/alpha/src", "C:/fixture/beta/src"].map(Utf8PathBuf::from));
         assert_eq!(
             survey.files.iter().map(|file| file.path.as_str()).collect::<Vec<_>>(),
             ["alpha/src/a.rs", "alpha/src/last.rs", "alpha/src/z.rs"]
@@ -3213,7 +3489,7 @@ mod tests {
                 survey.resource_dependencies,
                 if cache_inputs { Vec::new() } else { expected.clone() }
             );
-            assert_eq!(directories.len(), if cache_inputs { 2 } else { 3 });
+            assert_eq!(directories.len(), if cache_inputs { 1 } else { 2 });
             assert_eq!(survey.declaration_files.len(), if cache_inputs { 1 } else { 2 });
         }
     }
@@ -3253,7 +3529,6 @@ mod tests {
         assert_eq!(
             directories,
             [
-                "C:/fixture/alpha/src",
                 "C:/fixture/alpha/src",
                 "C:/fixture/beta/src",
                 "C:/fixture/beta/tools",
@@ -3325,13 +3600,7 @@ mod tests {
         assert!(checked.get());
         assert_eq!(
             directories,
-            [
-                "C:/fixture/alpha/src",
-                "C:/fixture/alpha/src",
-                "C:/fixture/beta/src",
-                "C:/fixture/gamma/src"
-            ]
-            .map(Utf8PathBuf::from)
+            ["C:/fixture/alpha/src", "C:/fixture/beta/src", "C:/fixture/gamma/src"].map(Utf8PathBuf::from)
         );
         assert_eq!(survey.files.len(), 1);
         assert_eq!(survey.files[0].path, Utf8Path::new("alpha/src/lib.rs"));
@@ -3421,13 +3690,358 @@ mod tests {
     }
 
     #[test]
-    fn recovered_declaration_worker_indices_never_allocate_an_extra_worker() {
-        for workers in [0, 1, 2, 3, 17, usize::MAX] {
-            let indices = declaration_worker_indices(workers);
-            assert_eq!(indices.start, 0);
-            assert_eq!(indices.end, workers);
-            assert_eq!(indices.len(), workers);
+    fn discovery_spawn_failure_cancels_admitted_workers_before_the_fixed_barrier() {
+        // These counters count completed events after scoped workers join, never publish results.
+        let ran = AtomicUsize::new(0);
+        let error = run_workers(
+            NonZero::new(3).unwrap(),
+            |_worker| {
+                let _previous = ran.fetch_add(1, Ordering::Relaxed);
+                panic!("an incomplete pool must not enter discovery's fixed barriers");
+            },
+            |worker| {
+                if worker == 1 {
+                    Err(std::io::Error::other("second spawn failed"))
+                } else {
+                    Ok(())
+                }
+            },
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("second spawn failed"));
+        assert_eq!(ran.load(Ordering::Relaxed), 0);
+        assert_eq!(
+            run_workers(NonZero::new(3).unwrap(), |worker| worker * 2, |_worker| Ok(())).unwrap(),
+            [0, 2, 4]
+        );
+    }
+
+    #[test]
+    fn discovery_admission_stops_at_the_first_refusal_without_trying_another_worker() {
+        let mut attempts = Vec::new();
+        let failure = run_workers(
+            NonZero::new(4).unwrap(),
+            |worker| worker,
+            |worker| {
+                attempts.push(worker);
+                if worker == 1 {
+                    Err(std::io::Error::other("first refusal"))
+                } else {
+                    Ok(())
+                }
+            },
+        )
+        .unwrap_err();
+        assert_eq!(attempts, [0, 1]);
+        assert!(failure.to_string().contains("first refusal"));
+    }
+
+    #[test]
+    fn an_admission_panic_releases_waiting_workers_without_running_an_incomplete_pool() {
+        // Scoped workers finish even on unwind; this event count does not publish worker state.
+        let ran = AtomicUsize::new(0);
+        let failure = catch_unwind(AssertUnwindSafe(|| {
+            run_workers(
+                NonZero::new(2).unwrap(),
+                |_| {
+                    ran.fetch_add(1, Ordering::Relaxed);
+                },
+                |worker| {
+                    assert_ne!(worker, 1, "injected admission panic");
+                    Ok(())
+                },
+            )
+        }));
+        let _panic = failure.expect_err("the injected admission panic must propagate");
+        assert_eq!(ran.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn selected_scans_and_declaration_batches_return_explicit_worker_refusals() {
+        let root = Utf8Path::new("discovery-worker-refusal");
+        let path = root.join("src/lib.rs");
+        let target = TargetFile {
+            path: "src/lib.rs".into(),
+            absolute: path.clone(),
+            package: "subject".into(),
+            source: None,
+        };
+        let selection = Selection::parse("literal.int_to_zero").unwrap();
+        let cfg = CfgSet::unconditional();
+        let failure = scan_with_declarations(
+            &[&target],
+            &[],
+            std::slice::from_ref(&path),
+            &selection,
+            &Cfgs::unconditional(),
+            &[],
+            &[],
+            parse_declarations_parallel,
+            None,
+            |_worker| Err(std::io::Error::other("injected discovery thread refusal")),
+        )
+        .unwrap_err();
+        assert!(failure.to_string().contains("injected discovery thread refusal"));
+        let files = [(path.as_path(), &cfg, "subject"), (root, &cfg, "subject")];
+        let failure = parse_declarations_with_workers(
+            &files,
+            || Ok(NonZero::new(2).unwrap()),
+            |_, _, _| panic!("parsers must not run after native worker refusal"),
+            |_| Err(std::io::Error::other("injected discovery thread refusal")),
+        )
+        .unwrap_err();
+        assert!(failure.to_string().contains("injected discovery thread refusal"));
+    }
+
+    #[test]
+    fn declaration_cache_returns_parse_failures_without_retaining_a_partial_entry() {
+        let cache = Mutex::default();
+        let cfg = CfgSet::unconditional();
+        let failure = cached_declarations_with(&cache, &[(Utf8Path::new("lib.rs"), &cfg, "subject")], |_, _| {
+            Err(error!("injected declaration parse failure"))
+        })
+        .unwrap_err();
+        assert_eq!(failure.message(), "injected declaration parse failure");
+        assert!(cache.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn skipped_declarations_are_retried_before_caching_recovered_evidence() {
+        use crate::discover::digest;
+
+        let cache = Mutex::default();
+        let cfg = CfgSet::unconditional();
+        let path = Utf8Path::new("lib.rs");
+        let files = [(path, &cfg, "subject")];
+        let parses = AtomicUsize::new(0);
+        for attempt in 0..3 {
+            let evidence = cached_declarations_with(&cache, &files, |path, _| {
+                if parses.fetch_add(1, Ordering::Relaxed) == 0 {
+                    Ok(DeclarationOutcome::Skipped(path.to_owned(), "temporarily unreadable".into()))
+                } else {
+                    Ok(DeclarationOutcome::Declared(
+                        path.to_owned(),
+                        Vec::new(),
+                        Box::default(),
+                        Vec::new(),
+                        digest(b"mod child;"),
+                    ))
+                }
+            })
+            .unwrap();
+            if attempt == 0 {
+                assert_eq!(evidence.skipped, [(path.to_owned(), "temporarily unreadable".into())]);
+                assert!(evidence.digests.is_empty());
+                assert!(cache.lock().unwrap().is_empty());
+            } else {
+                assert_eq!(evidence.skipped, [] as [(Utf8PathBuf, String); 0]);
+                assert_eq!(evidence.digests, HashMap::from_iter([(path.to_owned(), digest(b"mod child;"))]));
+            }
         }
+        assert_eq!(parses.load(Ordering::Relaxed), 2);
+    }
+
+    #[cfg(any(unix, windows))]
+    fn non_unicode_name() -> OsString {
+        #[cfg(unix)]
+        {
+            OsString::from_vec(b"native-\xff".to_vec())
+        }
+        #[cfg(windows)]
+        {
+            OsString::from_wide(&[110, 97, 116, 105, 118, 101, 45, 0xd800])
+        }
+    }
+
+    #[cfg(any(unix, windows))]
+    fn link_directory(target: &std::path::Path, link: &Utf8Path) {
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(target, link).unwrap();
+        #[cfg(windows)]
+        std::os::windows::fs::symlink_dir(target, link).unwrap();
+    }
+
+    #[test]
+    #[cfg(all(feature = "system-tests", any(unix, windows)))]
+    fn selected_declarations_return_unrepresentable_native_module_paths_without_panicking() {
+        let text = "#[path = \"linked/child.rs\"] mod child;\n";
+        let (directory, root) = crate::fixtures::private_crate_dir("declaration-native-path-", text);
+        let native = directory.path().join(non_unicode_name());
+        fs::create_dir(&native).unwrap();
+        fs::write(native.join("child.rs"), "pub fn child() {}\n").unwrap();
+        link_directory(&native, &root.join("src/linked"));
+        let target = TargetFile {
+            path: "src/lib.rs".into(),
+            absolute: root.join("src/lib.rs"),
+            package: "subject".into(),
+            source: Some(text.into()),
+        };
+        let parsed = SourceFile::parse(target.absolute.as_str(), text.into()).unwrap();
+        let failure = selected_declarations(&target, &parsed, &CfgSet::unconditional(), None)
+            .expect_err("physical module resolution rejects a non-UTF-8 link target");
+        assert!(failure.to_string().contains("UTF-8"), "{failure}");
+    }
+
+    #[test]
+    #[cfg(all(feature = "system-tests", any(unix, windows)))]
+    fn external_input_discovery_returns_both_workspace_and_package_path_resolution_errors() {
+        let directory = crate::testing::private_system_tempdir("external-native-path-");
+        let container = Utf8Path::from_path(directory.path()).unwrap();
+        let root = container.join("project");
+        let foreign = container.join("foreign");
+        write(
+            &root,
+            "Cargo.toml",
+            "[package]\nname='project'\nversion='0.1.0'\nedition='2024'\n[dependencies]\nforeign={path='../foreign'}\n[workspace]\n",
+        );
+        write(&root, "src/lib.rs", "pub fn value() {}\n");
+        write(
+            &foreign,
+            "Cargo.toml",
+            "[package]\nname='foreign'\nversion='0.1.0'\nedition='2024'\n[workspace]\n",
+        );
+        write(&foreign, "src/lib.rs", "pub fn foreign() {}\n");
+        let metadata = MetadataCommand::new()
+            .manifest_path(root.join("Cargo.toml"))
+            .other_options(vec!["--offline".into()])
+            .exec()
+            .unwrap();
+        let native = directory.path().join(non_unicode_name());
+        for changed in [&root, &foreign] {
+            fs::rename(changed, &native).unwrap();
+            link_directory(&native, changed);
+            let failure = external_path_inputs_from_metadata(&metadata, &root)
+                .err()
+                .expect("physical input resolution rejects a non-UTF-8 link target");
+            assert!(failure.to_string().contains("UTF-8"), "{failure}");
+            #[cfg(unix)]
+            fs::remove_file(changed).unwrap();
+            #[cfg(windows)]
+            fs::remove_dir(changed).unwrap();
+            fs::rename(&native, changed).unwrap();
+        }
+    }
+
+    #[test]
+    fn external_inputs_exclude_registry_and_nested_workspace_packages_and_sort_unique_local_roots() {
+        let directory = crate::testing::workdir("external-input-matrix-");
+        let container = crate::paths::physical(Utf8Path::from_path(directory.path()).unwrap()).unwrap();
+        let root = container.join("workspace");
+        let mut metadata = selection_metadata();
+        let mut registry = metadata.packages[0].clone();
+        registry.source = serde_json::from_str("\"registry+https://github.com/rust-lang/crates.io-index\"").unwrap();
+        registry.manifest_path = container.join("registry/Cargo.toml");
+        let mut zeta = metadata.packages[0].clone();
+        zeta.source = None;
+        zeta.manifest_path = container.join("zeta/Cargo.toml");
+        let mut alpha = zeta.clone();
+        alpha.manifest_path = container.join("alpha/Cargo.toml");
+        let mut nested = zeta.clone();
+        nested.manifest_path = root.join("nested/Cargo.toml");
+        metadata.packages = vec![registry, zeta, nested, alpha.clone(), alpha];
+        let inputs = external_path_inputs_from_metadata(&metadata, &root).unwrap();
+        assert_eq!(inputs.roots, [container.join("alpha"), container.join("zeta")]);
+        assert!(!inputs.has_build_scripts);
+    }
+
+    #[test]
+    fn killer_discovery_reads_overlapping_native_source_roots_once_in_canonical_order() {
+        let (_directory, root) = survivor_nested_workspace();
+        let outer = root.join("outer");
+        let manifest = fs::read_to_string(outer.join("Cargo.toml")).unwrap();
+        fs::write(outer.join("Cargo.toml"), format!("{manifest}\n[lib]\npath='lib.rs'\n")).unwrap();
+        fs::rename(outer.join("src/lib.rs"), outer.join("lib.rs")).unwrap();
+        for file in ["outer/lib.rs", "outer/inner/src/lib.rs"] {
+            let path = root.join(file);
+            let source = fs::read_to_string(&path).unwrap();
+            fs::write(path, format!("{source}\n#[test] fn same_case() {{}}\n")).unwrap();
+        }
+        let survey = survey(&root, SelectArgs::default());
+        let mut read = Vec::new();
+        let killers = survey.killers_with_reader(|path| {
+            read.push(path.to_owned());
+            fs::read(path)
+        });
+        let canonical_outer = crate::paths::physical(&root.join("outer/lib.rs")).unwrap();
+        let mut expected =
+            ["outer/lib.rs", "outer/inner/src/lib.rs", "sibling/src/lib.rs"].map(|file| crate::paths::physical(&root.join(file)).unwrap());
+        expected.sort();
+        assert_eq!(read, expected);
+        assert_eq!(killers.file_for("same_case"), Some(canonical_outer.as_path()));
+        assert!(killers.is_complete());
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore = "reads native Cargo metadata for a real fixture package")]
+    fn survey_selection_reuses_declarations_and_refuses_a_midcampaign_source_change() {
+        let (_directory, root) = crate::fixtures::crate_dir("survey-declaration-cache-", "pub fn value() -> i32 { 3 }\n");
+        let survey = survey(&root, SelectArgs::default());
+        let selection = Selection::parse("literal.int_to_zero").unwrap();
+        let mut ordinal = 0;
+        assert!(
+            !survey
+                .scan_excluding(None, &selection, &mut ordinal, None)
+                .unwrap()
+                .mutants
+                .is_empty()
+        );
+        fs::write(root.join("src/lib.rs"), "pub fn value() -> i32 { 4 }\n").unwrap();
+        let _formatted = format!("{survey:?}");
+        let failure = survey.scan_excluding(None, &selection, &mut ordinal, None).unwrap_err();
+        let changed = failure.source().unwrap().downcast_ref::<SourceChanged>().unwrap();
+        assert_eq!(changed.path, Utf8Path::new("src/lib.rs"));
+    }
+
+    #[test]
+    fn declaration_evidence_reuses_package_inputs_without_hiding_supplied_source_edits() {
+        let path = Utf8Path::new("lib.rs");
+        let original = "pub fn value() -> i32 { 7 }";
+        let edited = "pub fn value() -> i32 { 8 }";
+        let cfg = CfgSet::unconditional();
+        let declarations = [(path, &cfg, "shared")];
+        let cache = Mutex::default();
+        // Reads follow the scoped worker join; this count is not an in-flight result signal.
+        let parses = AtomicUsize::new(0);
+        for _consumer in 0..3 {
+            let evidence = cached_declarations_with(&cache, &declarations, |path, cfg| {
+                let _previous = parses.fetch_add(1, Ordering::Relaxed);
+                let source = SourceFile::parse(path.as_str(), original.to_owned()).unwrap();
+                declaration_of_source(path, &source, cfg, |_, _, _| Ok(Vec::new()))
+            })
+            .unwrap();
+            assert_eq!(evidence.digests[path], crate::discover::digest(original.as_bytes()));
+        }
+        assert_eq!(parses.load(Ordering::Relaxed), 1);
+        let target = TargetFile {
+            path: "lib.rs".into(),
+            absolute: path.to_owned(),
+            package: "shared".into(),
+            source: Some(original.into()),
+        };
+        let unchanged = SourceFile::parse(path.as_str(), original.into()).unwrap();
+        let DeclarationOutcome::Declared(_, _, _, _, digest) = selected_declarations(&target, &unchanged, &cfg, Some(&cache)).unwrap()
+        else {
+            panic!("the supplied source is valid Rust");
+        };
+        assert_eq!(digest, crate::discover::digest(original.as_bytes()));
+        let changed_source = SourceFile::parse(path.as_str(), edited.into()).unwrap();
+        let failure = selected_declarations(&target, &changed_source, &cfg, Some(&cache)).unwrap_err();
+        let changed = failure.source().unwrap().downcast_ref::<SourceChanged>().unwrap();
+        assert_eq!(changed.path, Utf8Path::new("lib.rs"));
+        let other_package = [(path, &cfg, "other")];
+        let evidence = cached_declarations_with(&cache, &other_package, |path, cfg| {
+            let _previous = parses.fetch_add(1, Ordering::Relaxed);
+            let source = SourceFile::parse(path.as_str(), edited.to_owned()).unwrap();
+            declaration_of_source(path, &source, cfg, |_, _, _| Ok(Vec::new()))
+        })
+        .unwrap();
+        assert_eq!(parses.load(Ordering::Relaxed), 2);
+        assert_eq!(evidence.digests[path], crate::discover::digest(edited.as_bytes()));
+        let retained = cached_declarations_with(&cache, &declarations, |_, _| {
+            panic!("another package's edit must not replace the retained package evidence")
+        })
+        .unwrap();
+        assert_eq!(retained.digests[path], crate::discover::digest(original.as_bytes()));
     }
 
     /// The name a test gives a file it wants a phase-1 survey worker to panic on.
@@ -3470,10 +4084,10 @@ mod tests {
         ];
         let roots = ["lib.rs", "selected.rs", "foreign.rs", "absent.rs"].map(Utf8PathBuf::from);
         assert_eq!(
-            population_roots(&files.iter().collect::<Vec<_>>(), &declarations, &roots),
+            population_roots(&files.iter().collect::<Vec<_>>(), &declarations, &roots, modules::identity),
             [Utf8PathBuf::from("lib.rs"), Utf8PathBuf::from("selected.rs")]
         );
-        assert_eq!(population_roots(&[], &declarations, &roots).len(), 0);
+        assert_eq!(population_roots(&[], &declarations, &roots, modules::identity).len(), 0);
     }
 
     #[test]
@@ -3518,11 +4132,14 @@ mod tests {
         let parsed = parse_declarations_with_workers(
             &files,
             || Ok(NonZero::new(2).unwrap()),
-            |path, _| {
+            |path, _, _| {
                 assert_ne!(thread::current().id(), caller);
                 Ok(DeclarationOutcome::Skipped(path.to_owned(), path.to_string()))
             },
-            |worker| admitted.push(worker),
+            |worker| {
+                admitted.push(worker);
+                Ok(())
+            },
         )
         .unwrap();
         assert_eq!(admitted, [0, 1]);
@@ -3564,6 +4181,7 @@ mod tests {
                 HashSet::default()
             };
             let shared = Shared {
+                cache: None,
                 next: AtomicUsize::new(0),
                 partials: Mutex::new(vec![once(("alpha".into(), defaults)).collect()]),
                 skipped: Mutex::new(if declaration_skip { Vec::new() } else { vec![(0, "skip".into())] }),
@@ -3641,6 +4259,7 @@ mod tests {
                 );
             }
             let shared = Shared {
+                cache: None,
                 resource_dependencies: &dependencies,
                 named: Mutex::new(vec![(app_root.clone(), Vec::new()), (dependency_root.clone(), Vec::new())]),
                 roots: &roots,
@@ -3797,6 +4416,147 @@ mod tests {
     }
 
     #[test]
+    fn incomplete_declaration_evidence_cannot_prove_a_standalone_rust_path_is_unowned() {
+        let result = module_targets_from(
+            &[],
+            Declarations {
+                digests: HashMap::default(),
+                named: Vec::new(),
+                declared: Vec::new(),
+                skipped: vec![
+                    (Utf8PathBuf::from("src/lib\n.rs"), "too deeply nested".into()),
+                    (Utf8PathBuf::from("src/main.rs"), "could not parse source".into()),
+                ],
+                defaults: HashMap::default(),
+                incomplete_packages: HashSet::default(),
+            },
+        );
+
+        let error = result.expect_err("incomplete declaration evidence cannot justify ignoring a Rust path");
+        assert!(error.is_usage(), "{error}");
+        assert_eq!(
+            error.to_string(),
+            "cannot prove that a standalone Rust diff path is unowned because declaration analysis was incomplete \
+             (src/lib\\n.rs: too deeply nested, src/main.rs: could not parse source)"
+        );
+    }
+
+    #[test]
+    fn ownership_inventory_reports_a_missing_source() {
+        let root = Utf8Path::new(env!("CARGO_MANIFEST_DIR"));
+        let cfgs = Cfgs::default();
+        let missing = root.join("src/discover/missing-ownership-source.rs");
+        assert!(!missing.exists());
+        let error = declared_module_targets(
+            &HashMap::from_iter([("cargo-gamma-lib".to_owned(), vec![missing.clone()])]),
+            &HashMap::default(),
+            &cfgs,
+        )
+        .expect_err("missing declaration source cannot prove ownership");
+        assert_eq!(error.message(), format!("could not read `{missing}`"));
+        assert!(!error.is_usage() && !error.is_skippable(), "{error}");
+        let cause = std::error::Error::source(&error).and_then(|cause| cause.downcast_ref::<std::io::Error>());
+        assert_eq!(cause.map(std::io::Error::kind), Some(std::io::ErrorKind::NotFound));
+    }
+
+    #[test]
+    fn an_unscanned_module_may_declare_more_source_files() {
+        let root = Utf8PathBuf::from("synthetic/src/lib.rs");
+        let source = Utf8PathBuf::from("synthetic/src/outer.rs");
+        let target = Utf8PathBuf::from("synthetic/scripts/shared.rs");
+        let inventory = |scan_shared, exclude_outer| {
+            let mut declared = vec![
+                (
+                    root.clone(),
+                    vec![modules::Declaration {
+                        target: source.clone(),
+                        excluded: exclude_outer,
+                    }],
+                ),
+                (
+                    source.clone(),
+                    vec![modules::Declaration {
+                        target: target.clone(),
+                        excluded: false,
+                    }],
+                ),
+            ];
+            if scan_shared {
+                declared.push((target.clone(), Vec::new()));
+            }
+            Declarations {
+                digests: HashMap::default(),
+                named: Vec::new(),
+                declared,
+                skipped: Vec::new(),
+                defaults: HashMap::default(),
+                incomplete_packages: HashSet::default(),
+            }
+        };
+        let roots = core::slice::from_ref(&root);
+        for (scan_shared, exclude_outer) in [(true, false), (false, true)] {
+            assert_eq!(
+                module_targets_from(roots, inventory(scan_shared, exclude_outer)).unwrap(),
+                HashSet::from_iter([source.clone(), target.clone()])
+            );
+        }
+        let error =
+            module_targets_from(roots, inventory(false, false)).expect_err("an unscanned module can declare more external source files");
+        assert!(error.is_usage(), "{error}");
+        assert_eq!(
+            error.to_string(),
+            "cannot prove that a standalone Rust diff path is unowned: `synthetic/src/outer.rs` declares module file \
+             `synthetic/scripts/shared.rs`, which is outside the declaration inventory"
+        );
+    }
+
+    #[test]
+    fn source_inclusion_prevents_proving_standalone_ownership() {
+        let path = Utf8Path::new("src/lib.rs");
+        let cfg = CfgSet::default();
+        for code in [
+            r#"include!("../scripts/shared.rs");"#,
+            r#"fn run() { std::include!(concat!("../scripts/", "shared.rs")); }"#,
+        ] {
+            let ast = syn::parse_file(code).unwrap();
+            let error = ownership_edges(path, &ast, &cfg).expect_err("included Rust can belong to the crate");
+            assert!(error.is_usage(), "{error}");
+            assert_eq!(
+                error.to_string(),
+                "cannot prove that a standalone Rust diff path is unowned: `src/lib.rs` uses `include!`, whose source path gamma does not resolve"
+            );
+        }
+        let ast = syn::parse_file(r#"const TEXT: &str = include_str!("README.md");"#).unwrap();
+        assert!(ownership_edges(path, &ast, &cfg).unwrap().is_empty());
+    }
+
+    #[test]
+    fn conditional_module_paths_are_reported_as_incomplete_ownership_evidence() {
+        let ast = syn::parse_file(r#"#[cfg_attr(windows, path = "../../../scripts/shared.rs")] mod shared;"#).unwrap();
+        let error = ownership_edges(Utf8Path::new("src/lib\n.rs"), &ast, &CfgSet::default())
+            .expect_err("an unevaluated path attribute can redirect ownership");
+        assert!(error.is_usage(), "{error}");
+        assert_eq!(
+            error.to_string(),
+            "cannot prove that a standalone Rust diff path is unowned: `src/lib\\n.rs` has a module with a conditional \
+             `#[path]` that gamma cannot resolve"
+        );
+    }
+
+    #[test]
+    fn block_local_module_prevents_proving_standalone_ownership() {
+        let ast = syn::parse_file(r#"fn run() { #[path = "../../../scripts/shared.rs"] mod shared; }"#).unwrap();
+        let error = ownership_edges(Utf8Path::new("src/lib\x1b.rs"), &ast, &CfgSet::default())
+            .expect_err("a block-local module can own a file outside the package");
+        assert!(error.is_usage(), "{error}");
+        assert_eq!(
+            error.to_string(),
+            "cannot prove that a standalone Rust diff path is unowned: `src/lib\\e.rs` declares `mod shared;` inside a block; \
+             gamma cannot resolve its source path there"
+        );
+    }
+
+    #[test]
     fn survivor_multiple_include_patterns_are_alternatives_not_requirements() {
         let args = SelectArgs {
             files: vec!["src/one.rs".to_owned(), "src/two.rs".to_owned()],
@@ -3917,6 +4677,8 @@ mod tests {
                 );
                 parse_declarations_parallel(extras)
             },
+            None,
+            |_worker| Ok(()),
         )
         .expect("selected and unselected source files parse");
         assert!(!scanned.mutants.is_empty());

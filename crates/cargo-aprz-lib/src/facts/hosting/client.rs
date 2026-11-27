@@ -5,10 +5,11 @@
 //!
 //! Minimal GitHub API client for fetching repository and issue data.
 
-use chrono::{DateTime, Utc};
 use fetch::{HeaderMap, HeaderValue, HttpResponse, StatusExt};
+use jiff::{Timestamp, ToSpan};
 use serde::Deserialize;
 
+use super::provider::MAX_RATE_LIMIT_WAIT_SECS;
 use crate::facts::resilient_http::LazyHttpClient;
 
 const LOG_TARGET: &str = "   hosting";
@@ -29,8 +30,8 @@ pub struct Repository {
 /// Minimal GitHub issue/PR info with only the fields we need
 #[derive(Debug, Deserialize)]
 pub struct Issue {
-    pub created_at: DateTime<Utc>,
-    pub closed_at: Option<DateTime<Utc>>,
+    pub created_at: Timestamp,
+    pub closed_at: Option<Timestamp>,
     pub state: IssueState,
     pub pull_request: Option<PullRequestMarker>,
     #[serde(default)]
@@ -56,14 +57,14 @@ pub enum IssueState {
 /// The `merged_at` field is populated by GitHub's issues endpoint when the PR has been merged.
 #[derive(Debug, Deserialize)]
 pub struct PullRequestMarker {
-    pub merged_at: Option<DateTime<Utc>>,
+    pub merged_at: Option<Timestamp>,
 }
 
 /// Rate limit information from response headers
 #[derive(Debug, Clone, Copy)]
 pub struct RateLimitInfo {
     pub remaining: usize,
-    pub reset_at: DateTime<Utc>,
+    pub reset_at: Timestamp,
 }
 
 /// Result of a hosting API call
@@ -122,13 +123,13 @@ impl Client {
 
         // #[gamma::skip(call.replace_with_default, call_result.default, tag = "timeout", reason = "discarding rate-limit headers turns bounded mocked responses into long retry pauses")]
         let rate_limit = extract_rate_limit_from_headers(resp.headers());
-        classify_response(resp, rate_limit, url)
+        classify_response(resp, rate_limit, url, Timestamp::now())
     }
 }
 
 /// Classify an HTTP response into a [`HostingApiResult`].
 // #[gamma::skip(parameter.default_shadow, tag = "timeout", reason = "discarding supplied rate-limit state replaces the mocked reset time with a one-hour retry pause")]
-fn classify_response(resp: HttpResponse, rate_limit: Option<RateLimitInfo>, url: &str) -> HostingApiResult<HttpResponse> {
+fn classify_response(resp: HttpResponse, rate_limit: Option<RateLimitInfo>, url: &str, now: Timestamp) -> HostingApiResult<HttpResponse> {
     let status = resp.status();
     log::debug!(target: LOG_TARGET, "HTTP {status} for {url}");
 
@@ -144,14 +145,14 @@ fn classify_response(resp: HttpResponse, rate_limit: Option<RateLimitInfo>, url:
             .headers()
             .get(fetch::http::header::RETRY_AFTER)
             .and_then(|h| h.to_str().ok())
-            .and_then(|s| crate::facts::resilient_http::parse_retry_after_value(s, Utc::now()));
+            .and_then(|s| crate::facts::resilient_http::parse_retry_after_value(s, now));
 
         // Secondary rate limit: Retry-After header present — honor the requested delay
         if let Some(secs) = retry_after_secs {
             log::warn!(target: LOG_TARGET, "Secondary rate limit (HTTP {status_code}, Retry-After: {secs}s) for {url}");
             return HostingApiResult::RateLimited(RateLimitInfo {
                 remaining: 0,
-                reset_at: Utc::now() + chrono::Duration::seconds(secs.cast_signed()),
+                reset_at: now + secs.min(MAX_RATE_LIMIT_WAIT_SECS).cast_signed().seconds(),
             });
         }
 
@@ -161,7 +162,7 @@ fn classify_response(resp: HttpResponse, rate_limit: Option<RateLimitInfo>, url:
             log::warn!(target: LOG_TARGET, "Primary rate limit exhausted (HTTP {status_code}) for {url}");
             let rate_limit = rate_limit.unwrap_or_else(|| RateLimitInfo {
                 remaining: 0,
-                reset_at: Utc::now() + chrono::Duration::hours(1),
+                reset_at: now + 1.hour(),
             });
             return HostingApiResult::RateLimited(rate_limit);
         }
@@ -202,7 +203,7 @@ fn extract_rate_limit_from_headers(headers: &HeaderMap) -> Option<RateLimitInfo>
     // #[gamma::skip(literal.str_to_empty, literal.str_to_xyzzy, tag = "timeout", reason = "invalidating the reset header turns bounded mocked responses into long retry pauses")]
     let reset_timestamp = headers.get("x-ratelimit-reset")?.to_str().ok()?.parse::<i64>().ok()?;
 
-    let reset_at = DateTime::from_timestamp(reset_timestamp, 0)?;
+    let reset_at = Timestamp::from_second(reset_timestamp).ok()?;
 
     // #[gamma::skip(option.some_to_none, tag = "timeout", reason = "discarding parsed rate-limit state turns bounded mocked responses into long retry pauses")]
     Some(RateLimitInfo { remaining, reset_at })
@@ -347,7 +348,7 @@ mod tests {
     fn test_rate_limit_info_copy() {
         let info1 = RateLimitInfo {
             remaining: 5000,
-            reset_at: DateTime::from_timestamp(1_234_567_890, 0).unwrap(),
+            reset_at: Timestamp::from_second(1_234_567_890).unwrap(),
         };
 
         let info2 = info1;
@@ -365,7 +366,7 @@ mod tests {
         let rate_limit = extract_rate_limit_from_headers(&headers).unwrap();
 
         assert_eq!(rate_limit.remaining, 4999);
-        assert_eq!(rate_limit.reset_at.timestamp(), 1_704_067_200);
+        assert_eq!(rate_limit.reset_at.as_second(), 1_704_067_200);
     }
 
     #[test]
@@ -377,7 +378,7 @@ mod tests {
         let rate_limit = extract_rate_limit_from_headers(&headers).expect("complete rate-limit headers yield info");
 
         assert_eq!(rate_limit.remaining, 0);
-        assert_eq!(rate_limit.reset_at.timestamp(), 1_704_067_200);
+        assert_eq!(rate_limit.reset_at.as_second(), 1_704_067_200);
     }
 
     #[test]
@@ -438,8 +439,6 @@ mod tests {
 
     #[test]
     fn test_extract_rate_limit_uses_zero_nanoseconds() {
-        use chrono::Timelike;
-
         let mut headers = HeaderMap::new();
         let _ = headers.insert("x-ratelimit-remaining", HeaderValue::from_static("4999"));
         let _ = headers.insert("x-ratelimit-reset", HeaderValue::from_static("1704067200"));
@@ -448,7 +447,7 @@ mod tests {
             extract_rate_limit_from_headers(&headers)
                 .expect("complete rate-limit headers yield info")
                 .reset_at
-                .nanosecond(),
+                .subsec_nanosecond(),
             0
         );
     }
@@ -503,7 +502,7 @@ mod tests {
     fn test_hosting_api_result_success() {
         let rate_limit = Some(RateLimitInfo {
             remaining: 5000,
-            reset_at: DateTime::from_timestamp(1_234_567_890, 0).unwrap(),
+            reset_at: Timestamp::from_second(1_234_567_890).unwrap(),
         });
 
         // We can't easily test Success variant without a real Response object,
@@ -513,14 +512,14 @@ mod tests {
 
     #[test]
     fn test_rate_limit_info_fields() {
-        let reset_time = DateTime::from_timestamp(1_704_067_200, 0).unwrap();
+        let reset_time = Timestamp::from_second(1_704_067_200).unwrap();
         let info = RateLimitInfo {
             remaining: 100,
             reset_at: reset_time,
         };
 
         assert_eq!(info.remaining, 100);
-        assert_eq!(info.reset_at.timestamp(), 1_704_067_200);
+        assert_eq!(info.reset_at.as_second(), 1_704_067_200);
     }
 
     // -- classify_response tests using wiremock --
@@ -541,7 +540,7 @@ mod tests {
         let url = server.uri();
         let resp = client.get(url.as_str()).fetch().await.unwrap();
         let rate_limit = extract_rate_limit_from_headers(resp.headers());
-        classify_response(resp, rate_limit, &url)
+        classify_response(resp, rate_limit, &url, Timestamp::now())
     }
 
     #[tokio::test]
@@ -614,7 +613,7 @@ mod tests {
         match result {
             HostingApiResult::RateLimited(rl) => {
                 assert_eq!(rl.remaining, 0);
-                assert_eq!(rl.reset_at.timestamp(), 1_704_067_200);
+                assert_eq!(rl.reset_at.as_second(), 1_704_067_200);
             }
             _ => panic!("expected RateLimited"),
         }
@@ -623,7 +622,7 @@ mod tests {
     #[tokio::test]
     #[cfg_attr(miri, ignore = "Miri cannot call CreateIoCompletionPort")]
     async fn classify_403_secondary_rate_limit_with_retry_after() {
-        let before = Utc::now();
+        let before = Timestamp::now();
         let result = classify(
             ResponseTemplate::new(403)
                 .insert_header("x-ratelimit-remaining", "100")
@@ -635,7 +634,7 @@ mod tests {
             HostingApiResult::RateLimited(rl) => {
                 assert_eq!(rl.remaining, 0);
                 // reset_at should be ~60s from now
-                let diff = (rl.reset_at - before).num_seconds();
+                let diff = (rl.reset_at - before).as_secs();
                 assert!((55..=65).contains(&diff), "expected ~60s, got {diff}s");
             }
             _ => panic!("expected RateLimited"),
@@ -646,12 +645,12 @@ mod tests {
     #[cfg_attr(miri, ignore = "Miri cannot call CreateIoCompletionPort")]
     async fn classify_403_no_rate_limit_headers_with_retry_after() {
         // Regression: Retry-After must be honored even when x-ratelimit-* headers are absent
-        let before = Utc::now();
+        let before = Timestamp::now();
         let result = classify(ResponseTemplate::new(403).insert_header("retry-after", "30")).await;
         match result {
             HostingApiResult::RateLimited(rl) => {
                 assert_eq!(rl.remaining, 0);
-                let diff = (rl.reset_at - before).num_seconds();
+                let diff = (rl.reset_at - before).as_secs();
                 assert!((25..=35).contains(&diff), "expected ~30s, got {diff}s");
             }
             _ => panic!("expected RateLimited"),
@@ -681,12 +680,12 @@ mod tests {
     #[cfg_attr(miri, ignore = "Miri cannot call CreateIoCompletionPort")]
     async fn classify_403_no_headers_no_retry_after() {
         // 403 with no rate limit headers and no Retry-After → primary rate limit (default 1h)
-        let before = Utc::now();
+        let before = Timestamp::now();
         let result = classify(ResponseTemplate::new(403)).await;
         match result {
             HostingApiResult::RateLimited(rl) => {
                 assert_eq!(rl.remaining, 0);
-                let diff = (rl.reset_at - before).num_seconds();
+                let diff = (rl.reset_at - before).as_secs();
                 assert!((3595..=3605).contains(&diff), "expected ~3600s, got {diff}s");
             }
             _ => panic!("expected RateLimited"),
@@ -696,16 +695,32 @@ mod tests {
     #[tokio::test]
     #[cfg_attr(miri, ignore = "Miri cannot call CreateIoCompletionPort")]
     async fn classify_429_with_retry_after() {
-        let before = Utc::now();
+        let before = Timestamp::now();
         let result = classify(ResponseTemplate::new(429).insert_header("retry-after", "10")).await;
         match result {
             HostingApiResult::RateLimited(rl) => {
                 assert_eq!(rl.remaining, 0);
-                let diff = (rl.reset_at - before).num_seconds();
+                let diff = (rl.reset_at - before).as_secs();
                 assert!((5..=15).contains(&diff), "expected ~10s, got {diff}s");
             }
             _ => panic!("expected RateLimited"),
         }
+    }
+
+    #[test]
+    fn classify_large_retry_after_caps_before_timestamp_addition() {
+        let now = Timestamp::from_second(1_704_067_200).expect("the fixed timestamp is valid");
+        let response = fetch::HttpResponseBuilder::new_fake()
+            .status(fetch::StatusCode::FORBIDDEN)
+            .header(fetch::http::header::RETRY_AFTER, "300000000000")
+            .build()
+            .expect("the fake response is valid");
+
+        let HostingApiResult::RateLimited(rate_limit) = classify_response(response, None, "https://example.test", now) else {
+            panic!("Retry-After must classify the response as rate limited");
+        };
+
+        assert_eq!(rate_limit.reset_at, now + MAX_RATE_LIMIT_WAIT_SECS.cast_signed().seconds());
     }
 
     #[tokio::test]
@@ -720,7 +735,7 @@ mod tests {
         match result {
             HostingApiResult::RateLimited(rl) => {
                 assert_eq!(rl.remaining, 0);
-                assert_eq!(rl.reset_at.timestamp(), 1_704_067_200);
+                assert_eq!(rl.reset_at.as_second(), 1_704_067_200);
             }
             _ => panic!("expected RateLimited"),
         }
@@ -739,7 +754,7 @@ mod tests {
         match result {
             HostingApiResult::RateLimited(rl) => {
                 assert_eq!(rl.remaining, 50);
-                assert_eq!(rl.reset_at.timestamp(), 1_704_067_200);
+                assert_eq!(rl.reset_at.as_second(), 1_704_067_200);
             }
             _ => panic!("expected RateLimited"),
         }
@@ -749,12 +764,12 @@ mod tests {
     #[cfg_attr(miri, ignore = "Miri cannot call CreateIoCompletionPort")]
     async fn classify_429_no_headers() {
         // 429 with no rate limit headers at all → still RateLimited with default
-        let before = Utc::now();
+        let before = Timestamp::now();
         let result = classify(ResponseTemplate::new(429)).await;
         match result {
             HostingApiResult::RateLimited(rl) => {
                 assert_eq!(rl.remaining, 0);
-                let diff = (rl.reset_at - before).num_seconds();
+                let diff = (rl.reset_at - before).as_secs();
                 assert!((3595..=3605).contains(&diff), "expected ~3600s, got {diff}s");
             }
             _ => panic!("expected RateLimited"),

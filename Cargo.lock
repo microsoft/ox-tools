@@ -433,7 +433,7 @@ dependencies = [
 
 [[package]]
 name = "cargo-anvil"
-version = "0.26.0"
+version = "0.30.0"
 dependencies = [
  "assert_cmd",
  "clap",
@@ -488,6 +488,7 @@ dependencies = [
  "http-body-util",
  "indicatif",
  "insta",
+ "jiff 1.0.0",
  "layered",
  "log",
  "mmap-rs",
@@ -533,7 +534,7 @@ dependencies = [
 
 [[package]]
 name = "cargo-coverage-gate"
-version = "0.7.5"
+version = "0.7.6"
 dependencies = [
  "assert_cmd",
  "cargo-platform",
@@ -551,7 +552,7 @@ dependencies = [
 
 [[package]]
 name = "cargo-each"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "assert_cmd",
  "cargo_metadata",
@@ -588,8 +589,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "cargo-ensure-no-test-features"
+version = "0.1.0"
+dependencies = [
+ "cargo_metadata",
+ "clap",
+ "ohno",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "cargo-gamma"
-version = "0.6.0"
+version = "0.8.0"
 dependencies = [
  "cargo-gamma-attrs",
  "cargo-gamma-lib",
@@ -600,7 +612,7 @@ dependencies = [
 
 [[package]]
 name = "cargo-gamma-attrs"
-version = "0.6.0"
+version = "0.8.0"
 dependencies = [
  "cargo-gamma-attrs-impl",
  "cargo_metadata",
@@ -610,7 +622,7 @@ dependencies = [
 
 [[package]]
 name = "cargo-gamma-attrs-impl"
-version = "0.6.0"
+version = "0.8.0"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -619,11 +631,10 @@ dependencies = [
 
 [[package]]
 name = "cargo-gamma-engine"
-version = "0.6.0"
+version = "0.8.0"
 dependencies = [
  "blake3",
  "bolero",
- "bolero-engine",
  "camino",
  "compact_str",
  "proc-macro2",
@@ -640,25 +651,26 @@ dependencies = [
 
 [[package]]
 name = "cargo-gamma-lib"
-version = "0.6.0"
+version = "0.8.0"
 dependencies = [
+ "base64 0.22.1",
  "blake3",
  "bolero",
- "bolero-engine",
  "camino",
  "cargo-gamma-attrs-impl",
  "cargo-gamma-engine",
  "cargo-gamma-process",
+ "cargo-gamma-process-test-helper",
  "cargo-gamma-rt",
  "cargo-gamma-unsafe",
  "cargo_metadata",
- "chrono",
  "clap",
  "clap_complete",
  "compact_str",
  "ignore",
  "libc",
  "loom",
+ "ohno",
  "owo-colors",
  "proc-macro2",
  "quote",
@@ -668,6 +680,7 @@ dependencies = [
  "saphyr-parser",
  "serde",
  "serde_json",
+ "sha2",
  "syn 3.0.9",
  "tempfile",
  "tick",
@@ -680,17 +693,24 @@ dependencies = [
 
 [[package]]
 name = "cargo-gamma-process"
-version = "0.6.0"
+version = "0.8.0"
 dependencies = [
+ "bolero",
  "camino",
+ "cargo-gamma-process-test-helper",
  "cargo-gamma-unsafe",
  "libc",
+ "ohno",
  "tempfile",
 ]
 
 [[package]]
+name = "cargo-gamma-process-test-helper"
+version = "0.0.0"
+
+[[package]]
 name = "cargo-gamma-rt"
-version = "0.6.0"
+version = "0.8.0"
 dependencies = [
  "loom",
  "tempfile",
@@ -698,7 +718,7 @@ dependencies = [
 
 [[package]]
 name = "cargo-gamma-unsafe"
-version = "0.6.0"
+version = "0.8.0"
 dependencies = [
  "cargo-gamma-rt",
  "libc",
@@ -743,6 +763,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "cargo-spellcheck-helper"
+version = "0.1.0"
+dependencies = [
+ "cc",
+ "clap",
+ "elf",
+ "glob",
+ "hunspell-dictgen",
+ "libloading",
+ "ohno",
+]
+
+[[package]]
 name = "cargo-unique-target-names"
 version = "0.1.0"
 dependencies = [
@@ -753,7 +786,7 @@ dependencies = [
 
 [[package]]
 name = "cargo-unused-deps"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "cargo_metadata",
  "clap",
@@ -1267,6 +1300,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0e9c71c2167ca323c882b99918929403426e2373ea17242ff5653e0d5e1058be"
 
 [[package]]
+name = "elf"
+version = "0.8.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "55dd888a213fc57e957abf2aa305ee3e8a28dbe05687a251f33b637cd46b0070"
+
+[[package]]
 name = "encode_unicode"
 version = "1.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1491,9 +1530,9 @@ checksum = "d9c4f5dac5e15c24eb999c26181a6ca40b39fe946cbe4c263c7209467bc83af2"
 
 [[package]]
 name = "form_urlencoded"
-version = "1.2.2"
+version = "1.2.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cb4cb245038516f5f85277875cdaa4f7d2c9a0fa0468de06ed190163b1581fcf"
+checksum = "afa489199eaffb1211795df1c6236ce1ad0d41a6fa45250add73e3b02420f06e"
 dependencies = [
  "percent-encoding",
 ]
@@ -2116,12 +2155,28 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b2b005715dcbeb0089a3c0dab99f2ff1cc3b2525323552703d648585d342a383"
 dependencies = [
  "defmt",
- "jiff-core",
- "jiff-static",
+ "jiff-core 0.1.1",
+ "jiff-static 0.2.38",
  "log",
  "portable-atomic",
  "portable-atomic-util",
  "serde_core",
+]
+
+[[package]]
+name = "jiff"
+version = "1.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9cc767b5763de45e810109520123bb2829a653f3a7ed9be40b2bc4f81158f595"
+dependencies = [
+ "jiff-core 1.0.0",
+ "jiff-static 1.0.0",
+ "jiff-tzdb-platform",
+ "log",
+ "portable-atomic",
+ "portable-atomic-util",
+ "serde_core",
+ "windows-link",
 ]
 
 [[package]]
@@ -2135,15 +2190,51 @@ dependencies = [
 ]
 
 [[package]]
+name = "jiff-core"
+version = "1.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "894f7ac42105f584100691b3bf6e6b92dd12fcfa225f6c397f95c8a94b47b68f"
+dependencies = [
+ "log",
+]
+
+[[package]]
 name = "jiff-static"
 version = "0.2.38"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2cc9817253cf7c7ee4684451bd327e88d6f3658014e54a29198625590650695c"
 dependencies = [
- "jiff-core",
+ "jiff-core 0.1.1",
  "proc-macro2",
  "quote",
  "syn 2.0.119",
+]
+
+[[package]]
+name = "jiff-static"
+version = "1.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "955491488dc99b572ea6d67b172dcd98787d00744b1fb44a5689b4e6413695a6"
+dependencies = [
+ "jiff-core 1.0.0",
+ "proc-macro2",
+ "quote",
+ "syn 3.0.9",
+]
+
+[[package]]
+name = "jiff-tzdb"
+version = "1.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "12e71a1b68a875a44a33bb7a1dd84392cb77145a3367a552a3cfe6a4f5cf3afc"
+
+[[package]]
+name = "jiff-tzdb-platform"
+version = "1.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "dc65b284afcfa8f6cf189c7274c805505314a7ab975c60e1f548bff56525420e"
+dependencies = [
+ "jiff-tzdb",
 ]
 
 [[package]]
@@ -2258,6 +2349,16 @@ name = "libc"
 version = "0.2.191"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "65cd87c9a6d60536580b316ad985726104730a5151c99845f2490428ef91240a"
+
+[[package]]
+name = "libloading"
+version = "0.8.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d7c4b02199fee7c5d21a5ae7d8cfa79a6ef5bb2fc834d6e9058e89c825efdc55"
+dependencies = [
+ "cfg-if",
+ "windows-link",
+]
 
 [[package]]
 name = "libmimalloc-sys"
@@ -3271,7 +3372,7 @@ dependencies = [
  "cargo-lock",
  "cvss",
  "fs-err",
- "jiff",
+ "jiff 0.2.38",
  "platforms",
  "semver",
  "serde",
@@ -3880,7 +3981,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6d78ddf145aada8350702c88dc94d6da7e4b08e4e18723484b2d244f8da5f20c"
 dependencies = [
  "futures-core",
- "jiff",
+ "jiff 0.2.38",
  "performables",
  "pin-project-lite",
  "thread_aware",
@@ -4168,9 +4269,9 @@ checksum = "8ecb6da28b8a351d773b68d5825ac39017e680750f980f3a1a85cd8dd28a47c1"
 
 [[package]]
 name = "url"
-version = "2.5.8"
+version = "2.5.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ff67a8a4397373c3ef660812acab3268222035010ab8680ec4215f38ba3d0eed"
+checksum = "f00cd2407bb42c0ef17be88d4cf020f5cceffd121665bac9b8b9493a369b3b1a"
 dependencies = [
  "form_urlencoded",
  "idna",

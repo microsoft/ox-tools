@@ -18,7 +18,7 @@
 //! process trees and do not observe build deadlines or cooperative cancellation.
 
 use std::process::Command;
-use std::{env, fs};
+use std::{env, fs, io};
 
 use camino::{Utf8Path, Utf8PathBuf};
 use cargo_gamma_engine::cfg::{CfgSet, Verdict};
@@ -26,15 +26,12 @@ use toml::{Table, Value};
 
 use crate::HashMap;
 
-/// Resolves whether Cargo Gamma can safely interpose outside Cargo's outer rustc wrapper.
-///
 /// A compiler-wrapper configuration and whether Cargo Gamma may safely interpose around it.
 #[derive(Debug, Eq, PartialEq)]
 pub(crate) enum RustcWrapperChain {
-    /// A configuration-file wrapper may be relative to the declaring file, so interposition must
-    /// stand down rather than risk launching a different executable from the workspace root.
+    /// Leave malformed configuration to Cargo rather than select a different executable.
     StandDown,
-    /// Interposition is safe, with the environment-provided outer wrapper when one exists.
+    /// The resolved outer wrapper, retaining bare executable names for Cargo's PATH lookup.
     Interpose(Option<std::ffi::OsString>),
 }
 
@@ -48,38 +45,53 @@ fn rustc_wrapper_chain_using(
     get: impl FnMut(&str) -> Option<std::ffi::OsString>,
     environment: &Environment,
 ) -> RustcWrapperChain {
-    rustc_wrapper_chain_in(root, environment_wrapper(get), environment)
+    rustc_wrapper_chain_in(root, environment_wrapper(get), environment, &read_file)
 }
 
 fn environment_wrapper(mut get: impl FnMut(&str) -> Option<std::ffi::OsString>) -> Option<std::ffi::OsString> {
-    get("RUSTC_WRAPPER")
-        .filter(|path| !path.is_empty())
-        .or_else(|| get("CARGO_BUILD_RUSTC_WRAPPER").filter(|path| !path.is_empty()))
+    get("RUSTC_WRAPPER").or_else(|| get("CARGO_BUILD_RUSTC_WRAPPER"))
 }
 
-fn rustc_wrapper_chain_in(root: &Utf8Path, outer: Option<std::ffi::OsString>, environment: &Environment) -> RustcWrapperChain {
-    if outer.is_some() {
-        return RustcWrapperChain::Interpose(outer);
-    }
-
-    let config = CargoConfig::load(root, environment);
-    let configured_environment = config
-        .keys(&["env"])
-        .iter()
-        .any(|name| name == "RUSTC_WRAPPER" || name == "CARGO_BUILD_RUSTC_WRAPPER");
-
-    if configured_environment || has_configured_wrapper(&config) {
-        RustcWrapperChain::StandDown
-    } else {
-        RustcWrapperChain::Interpose(None)
-    }
+fn rustc_wrapper_chain_in(
+    root: &Utf8Path,
+    outer: Option<std::ffi::OsString>,
+    environment: &Environment,
+    read: &impl Fn(&Utf8Path) -> io::Result<Vec<u8>>,
+) -> RustcWrapperChain {
+    configured_wrapper_chain(outer, || CargoConfig::load(root, environment, read).tables)
 }
 
-fn has_configured_wrapper(config: &CargoConfig) -> bool {
-    // #[gamma::skip(collection.reverse_array, reason = "Array is consumed only by any() over pure string membership predicates; reversing evaluation order changes neither existential result nor state.", tag = "equivalent")]
-    ["rustc-wrapper", "rustc-workspace-wrapper"]
-        .into_iter()
-        .any(|key| config.string(&["build", key]).is_some())
+fn configured_wrapper_chain(outer: Option<std::ffi::OsString>, tables: impl FnOnce() -> Vec<(Table, Utf8PathBuf)>) -> RustcWrapperChain {
+    if let Some(outer) = outer {
+        return RustcWrapperChain::Interpose((!outer.is_empty()).then_some(outer));
+    }
+
+    // Cargo selects wrappers from its original environment/configuration, not its child-only
+    // [env] table. Its workspace wrapper stays in the forwarded argv, inside this outer wrapper.
+    for (table, origin) in &tables() {
+        let Some(value) = lookup(table, &["build", "rustc-wrapper"]) else {
+            continue;
+        };
+        let Some(value) = value.as_str() else {
+            return RustcWrapperChain::StandDown;
+        };
+        if value.is_empty() {
+            return RustcWrapperChain::Interpose(None);
+        }
+        // #[gamma::skip(collection.reverse_array, tag = "equivalent", reason = "contains treats both separators as unordered, pure membership alternatives.")]
+        let program = if value.contains(['/', '\\']) {
+            // Cargo anchors relative paths to the parent of the config directory; bare names use PATH.
+            // https://doc.rust-lang.org/cargo/reference/config.html#config-relative-paths
+            let Some(directory) = origin.parent().and_then(|path| path.parent()) else {
+                return RustcWrapperChain::StandDown;
+            };
+            directory.join(value).into_std_path_buf().into_os_string()
+        } else {
+            value.into()
+        };
+        return RustcWrapperChain::Interpose(Some(program));
+    }
+    RustcWrapperChain::Interpose(None)
 }
 
 /// How many `inherits` hops a profile chain may take before it is called malformed.
@@ -138,21 +150,30 @@ impl Build {
     /// would have said is either supplied by a file further out or left unanswered.
     #[must_use]
     pub fn resolve(root: &Utf8Path, profile: Option<&str>, extra: &[String]) -> Self {
-        Self::resolve_in(root, profile, extra, &Environment::ambient())
+        Self::resolve_in(root, profile, extra, &Environment::ambient(), &read_file)
     }
 
-    /// Resolves against a given environment, so the tests do not depend on the ambient one.
+    /// Resolves against explicit environment and file inputs.
     ///
     /// The variables cargo reads are taken as a value so tests need not write the process
     /// environment.
-    fn resolve_in(root: &Utf8Path, profile: Option<&str>, extra: &[String], environment: &Environment) -> Self {
-        let config = CargoConfig::load(root, environment);
+    fn resolve_in(
+        root: &Utf8Path,
+        profile: Option<&str>,
+        extra: &[String],
+        environment: &Environment,
+        read: &impl Fn(&Utf8Path) -> io::Result<Vec<u8>>,
+    ) -> Self {
+        let config = CargoConfig::load(root, environment, read);
         let (target, several_targets) = target(extra, environment, &config);
         let (flags, undecided) = rustflags(environment, &config, target.as_deref());
         let profile = named_profile(extra).or_else(|| profile.map(ToOwned::to_owned));
 
         Self {
-            debug_assertions: assertions(&flags).or_else(|| profile_assertions(root, &config, profile.as_deref())),
+            debug_assertions: assertions(&flags).or_else(|| {
+                let manifest = read_table(&root.join("Cargo.toml"), read);
+                profile_assertions_with_manifest(&config, profile.as_deref(), manifest.as_ref())
+            }),
             cfgs: valued(&flags, "--cfg"),
             codegen: codegen(&flags),
             target,
@@ -234,13 +255,13 @@ impl Build {
     /// mutant that is silently dropped from the denominator.
     #[must_use]
     pub fn settings(root: &Utf8Path) -> Vec<String> {
-        Self::settings_in(root, &Environment::ambient())
+        Self::settings_in(root, &Environment::ambient(), &read_file)
     }
 
     /// Reads the settings against a given environment, so the tests do not depend on the ambient
     /// one; see [`Self::resolve_in`].
-    fn settings_in(root: &Utf8Path, environment: &Environment) -> Vec<String> {
-        let config = CargoConfig::load(root, environment);
+    fn settings_in(root: &Utf8Path, environment: &Environment, read: &impl Fn(&Utf8Path) -> io::Result<Vec<u8>>) -> Vec<String> {
+        let config = CargoConfig::load(root, environment, read);
         let mut parts = Vec::new();
 
         // Cargo configurations can set far more than the predicates this resolver projects. The
@@ -266,9 +287,9 @@ impl Build {
         // file rather than a merged view, because the merge is the resolution's business: a key
         // that moves from one file to another changes which of them wins, and a reader that only
         // kept the winner could not see that it had.
-        let manifest = read_table(&root.join("Cargo.toml"));
+        let manifest = read_table(&root.join("Cargo.toml"), read);
 
-        for table in config.tables.iter().chain(manifest.as_ref()) {
+        for table in config.tables.iter().map(|(table, _origin)| table).chain(manifest.as_ref()) {
             if let Some(profiles) = table.get("profile") {
                 parts.push(format!("profile={profiles}"));
             }
@@ -411,21 +432,24 @@ impl Environment {
 /// Cargo reads `.cargo/config.toml` from the directory it runs in and every directory above it,
 /// then the user-wide file. A setting from a nearer file wins, and array-valued settings are
 /// joined, which is what this preserves by keeping the files in order rather than merging them.
+///
+/// Each directory contributes only its first matching file: Cargo gives `config` precedence over
+/// `config.toml` in both the project hierarchy and Cargo home.
 #[derive(Debug, Default)]
 struct CargoConfig {
-    tables: Vec<Table>,
+    tables: Vec<(Table, Utf8PathBuf)>,
     sources: Vec<String>,
 }
 
 impl CargoConfig {
-    fn load(dir: &Utf8Path, environment: &Environment) -> Self {
+    fn load(dir: &Utf8Path, environment: &Environment, read: &impl Fn(&Utf8Path) -> io::Result<Vec<u8>>) -> Self {
         let mut config = Self::default();
         let mut at = Some(dir);
 
         while let Some(directory) = at {
-            for name in ["config.toml", "config"] {
+            for name in ["config", "config.toml"] {
                 let path = directory.join(".cargo").join(name);
-                if config.include(&path) {
+                if config.include(&path, read) {
                     break;
                 }
             }
@@ -437,9 +461,9 @@ impl CargoConfig {
         if let Some(home) = environment.cargo_home.as_ref()
             && !cargo_home_was_walked(dir, home)
         {
-            for name in ["config.toml", "config"] {
+            for name in ["config", "config.toml"] {
                 let path = home.join(name);
-                if config.include(&path) {
+                if config.include(&path, read) {
                     break;
                 }
             }
@@ -452,8 +476,8 @@ impl CargoConfig {
     ///
     /// A syntactically invalid file still changes Cargo's behavior by making the build fail, so
     /// its bytes must invalidate a prior successful record even though no table can be resolved.
-    fn include(&mut self, path: &Utf8Path) -> bool {
-        let bytes = match fs::read(path.as_std_path()) {
+    fn include(&mut self, path: &Utf8Path, read: &impl Fn(&Utf8Path) -> io::Result<Vec<u8>>) -> bool {
+        let bytes = match read(path) {
             Ok(bytes) => bytes,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return false,
             Err(error) => {
@@ -467,7 +491,7 @@ impl CargoConfig {
         if let Ok(text) = core::str::from_utf8(&bytes)
             && let Ok(table) = toml::from_str(text)
         {
-            self.tables.push(table);
+            self.tables.push((table, path.to_owned()));
         }
 
         true
@@ -475,7 +499,7 @@ impl CargoConfig {
 
     /// The nearest file's value for a dotted key, when it is a string.
     fn string(&self, path: &[&str]) -> Option<&str> {
-        self.tables.iter().find_map(|table| lookup(table, path)?.as_str())
+        self.tables.iter().find_map(|(table, _origin)| lookup(table, path)?.as_str())
     }
 
     /// Every file's value for a dotted key, as the list of strings cargo would join them into.
@@ -485,7 +509,7 @@ impl CargoConfig {
     fn strings(&self, path: &[&str]) -> Vec<String> {
         self.tables
             .iter()
-            .filter_map(|table| lookup(table, path))
+            .filter_map(|(table, _origin)| lookup(table, path))
             .flat_map(|value| match value {
                 Value::String(one) => vec![one.clone()],
                 Value::Array(many) => many.iter().filter_map(|entry| entry.as_str().map(ToOwned::to_owned)).collect(),
@@ -499,7 +523,7 @@ impl CargoConfig {
         let mut names: Vec<String> = self
             .tables
             .iter()
-            .filter_map(|table| lookup(table, path)?.as_table())
+            .filter_map(|(table, _origin)| lookup(table, path)?.as_table())
             .flat_map(|table| table.keys().cloned())
             .collect();
 
@@ -515,10 +539,16 @@ fn cargo_home_was_walked(dir: &Utf8Path, home: &Utf8Path) -> bool {
 }
 
 /// Reads a TOML file, or nothing at all when it is absent or malformed.
-fn read_table(path: &Utf8Path) -> Option<Table> {
-    let text = fs::read_to_string(path.as_std_path()).ok()?;
+fn read_table(path: &Utf8Path, read: &impl Fn(&Utf8Path) -> io::Result<Vec<u8>>) -> Option<Table> {
+    let bytes = read(path).ok()?;
+    let text = core::str::from_utf8(&bytes).ok()?;
 
-    toml::from_str(&text).ok()
+    toml::from_str(text).ok()
+}
+
+#[cfg_attr(coverage_nightly, coverage(off))]
+fn read_file(path: &Utf8Path) -> io::Result<Vec<u8>> {
+    fs::read(path.as_std_path())
 }
 
 /// Follows a dotted key through nested tables.
@@ -934,11 +964,6 @@ fn named_profile(extra: &[String]) -> Option<String> {
 /// Returns `None` for a profile whose chain cannot be followed — a custom profile that inherits
 /// from nothing, or from itself — because a guess either way deletes half of the conditionally
 /// compiled code from the population.
-fn profile_assertions(root: &Utf8Path, config: &CargoConfig, profile: Option<&str>) -> Option<bool> {
-    let manifest = read_table(&root.join("Cargo.toml"));
-    profile_assertions_with_manifest(config, profile, manifest.as_ref())
-}
-
 fn profile_assertions_with_manifest(config: &CargoConfig, profile: Option<&str>, manifest: Option<&Table>) -> Option<bool> {
     let declared = |name: &str, key: &str| {
         config.string(&["profile", name, key]).map(ToOwned::to_owned).or_else(|| {
@@ -988,7 +1013,7 @@ fn lookup_bool(config: &CargoConfig, manifest: Option<&Table>, profile: &str, ke
     config
         .tables
         .iter()
-        .find_map(|table| lookup(table, &path)?.as_bool())
+        .find_map(|(table, _origin)| lookup(table, &path)?.as_bool())
         .or_else(|| lookup(manifest?, &path)?.as_bool())
 }
 
@@ -1002,9 +1027,24 @@ mod tests {
     #[cfg(windows)]
     use std::os::windows::process::ExitStatusExt as _;
 
-    use tempfile::TempDir;
-
     use super::*;
+
+    #[derive(Default)]
+    struct Files(HashMap<Utf8PathBuf, Vec<u8>>);
+
+    impl Files {
+        fn read(&self, path: &Utf8Path) -> io::Result<Vec<u8>> {
+            self.0.get(path).cloned().ok_or_else(|| io::ErrorKind::NotFound.into())
+        }
+
+        fn reader(&self) -> impl Fn(&Utf8Path) -> io::Result<Vec<u8>> + '_ {
+            |path| self.read(path)
+        }
+
+        fn write(&mut self, path: Utf8PathBuf, contents: &str) {
+            let _previous = self.0.insert(path, contents.as_bytes().to_vec());
+        }
+    }
 
     #[test]
     fn oct29_empty_environment_restores_the_enclosing_scope_after_success_and_unwind() {
@@ -1039,11 +1079,12 @@ mod tests {
     fn recovered_hyphenated_debug_assertions_take_precedence_over_the_legacy_alias() {
         for (preferred, legacy) in [(true, false), (false, true)] {
             let config = CargoConfig {
-                tables: vec![
+                tables: vec![(
                     format!("[profile.survivor]\ndebug-assertions = {preferred}\ndebug_assertions = {legacy}\n")
                         .parse()
                         .unwrap(),
-                ],
+                    "synthetic/.cargo/config.toml".into(),
+                )],
                 ..CargoConfig::default()
             };
             assert_eq!(profile_assertions_with_manifest(&config, Some("survivor"), None), Some(preferred));
@@ -1085,11 +1126,12 @@ mod tests {
     #[test]
     fn survivor_ambient_rustflags_leave_overridden_target_table_predicates_undecided() {
         let config = CargoConfig {
-            tables: vec![
+            tables: vec![(
                 toml::from_str("[target.fixture-target]\nrustflags = ['--cfg', 'from_table', '-Cpanic=abort']\n")
                     .expect("valid Cargo configuration"),
-            ],
-            sources: Vec::new(),
+                "synthetic/.cargo/config.toml".into(),
+            )],
+            ..CargoConfig::default()
         };
         for encoded in [false, true] {
             let environment = Environment {
@@ -1154,27 +1196,29 @@ mod tests {
 
     #[test]
     fn public_profile_and_requested_host_queries_use_explicit_inputs() {
-        let (_directory, root) = tree(&[(
+        let (files, root) = tree(&[(
             ".cargo/config.toml",
             "[build]\nrustflags = ['-Cdebug-assertions=off']\n\
              [profile.dev]\ndebug-assertions = true\n\
              [profile.quiet]\ninherits = 'dev'\ndebug-assertions = false\n",
         )]);
-        // Match the public Cargo invocation's explicit empty RUSTFLAGS: it masks configured flags
-        // so these assertions exercise profile resolution rather than an ancestor's build policy.
+        // Empty RUSTFLAGS masks the fixture's configured flags to exercise profile resolution.
         let environment = Environment {
             rustflags: Some(String::new()),
             ..empty(&root)
         };
         assert_eq!(
-            Build::resolve_in(&root, Some("quiet"), &[], &environment).debug_assertions,
+            Build::resolve_in(&root, Some("quiet"), &[], &environment, &files.reader()).debug_assertions,
             Some(false)
         );
-        assert_eq!(Build::resolve_in(&root, None, &[], &environment).debug_assertions, Some(true));
+        assert_eq!(
+            Build::resolve_in(&root, None, &[], &environment, &files.reader()).debug_assertions,
+            Some(true)
+        );
 
         let config = CargoConfig {
             tables: Vec::new(),
-            sources: Vec::new(),
+            ..CargoConfig::default()
         };
         let consulted = Cell::new(false);
         assert_eq!(
@@ -1192,20 +1236,19 @@ mod tests {
         );
     }
 
-    /// A workspace root with the given files written into it, and no environment at all.
-    fn tree(files: &[(&str, &str)]) -> (TempDir, Utf8PathBuf) {
-        let directory = TempDir::new().expect("a temporary directory");
-        let root = Utf8PathBuf::from_path_buf(directory.path().to_path_buf()).expect("the temporary path is not UTF-8");
-
-        crate::testing::write_fixture(root.as_std_path(), files);
-
-        (directory, root)
+    /// An in-memory tree, including only the explicitly supplied configuration and manifest files.
+    fn tree(entries: &[(&str, &str)]) -> (Files, Utf8PathBuf) {
+        let root = Utf8PathBuf::from("/users/fixture/workspace");
+        let mut files = Files::default();
+        for (path, contents) in entries {
+            files.write(root.join(path), contents);
+        }
+        (files, root)
     }
 
     /// An environment holding nothing, so a fixture answers for itself.
     ///
-    /// `cargo_home` points into the fixture, which has no user-wide file, so whatever the machine
-    /// running the tests has configured cannot reach them.
+    /// File reads are isolated separately, including the ancestor search above this Cargo home.
     fn empty(root: &Utf8Path) -> Environment {
         Environment {
             cargo_home: Some(root.join("nowhere")),
@@ -1283,10 +1326,10 @@ mod tests {
         assert_eq!(profile.cargo_home.as_deref(), Some(Utf8Path::new("profile/.cargo")));
     }
 
-    fn resolve(root: &Utf8Path, profile: Option<&str>, extra: &[&str]) -> Build {
+    fn resolve(files: &Files, root: &Utf8Path, profile: Option<&str>, extra: &[&str]) -> Build {
         let extra: Vec<String> = extra.iter().map(|argument| (*argument).to_owned()).collect();
 
-        Build::resolve_in(root, profile, &extra, &empty(root))
+        Build::resolve_in(root, profile, &extra, &empty(root), &files.reader())
     }
 
     /// The settings a record has to notice are read whole, not through the resolution that
@@ -1294,7 +1337,7 @@ mod tests {
     /// read it compiles.
     #[test]
     fn the_settings_name_every_file_borne_input_the_resolution_reads() {
-        let (_directory, root) = tree(&[
+        let (files, root) = tree(&[
             (
                 ".cargo/config.toml",
                 "[build]\ntarget = \"wasm32-unknown-unknown\"\nrustflags = [\"--cfg\", \"loom\"]\n\n[target.'cfg(unix)']\nrustflags = [\"-Cdebug-assertions=on\"]\n\n[profile.dev]\ndebug-assertions = false\n",
@@ -1302,7 +1345,7 @@ mod tests {
             ("Cargo.toml", "[profile.mutants]\ninherits = \"release\"\ndebug-assertions = true\n"),
         ]);
 
-        let settings = Build::settings_in(&root, &empty(&root));
+        let settings = Build::settings_in(&root, &empty(&root), &files.reader());
 
         assert!(settings.contains(&"build.target=wasm32-unknown-unknown".to_owned()), "{settings:?}");
         assert!(settings.contains(&"build.rustflags=--cfg".to_owned()), "{settings:?}");
@@ -1322,9 +1365,9 @@ mod tests {
     /// with the machine the tests run on.
     #[test]
     fn an_unconfigured_workspace_holds_no_settings() {
-        let (_directory, root) = tree(&[]);
+        let (files, root) = tree(&[]);
 
-        assert_eq!(Build::settings_in(&root, &empty(&root)).len(), 0);
+        assert_eq!(Build::settings_in(&root, &empty(&root), &files.reader()).len(), 0);
     }
 
     #[test]
@@ -1346,75 +1389,134 @@ mod tests {
 
     #[test]
     fn an_ambient_wrapper_is_interposed_without_consulting_cargo_configuration() {
-        let (_directory, root) = tree(&[(".cargo/config.toml", "[build]\nrustc-wrapper = \"configured\"\n")]);
         let outer = std::ffi::OsString::from("ambient");
 
         assert_eq!(
-            rustc_wrapper_chain_in(&root, Some(outer.clone()), &empty(&root)),
+            configured_wrapper_chain(Some(outer.clone()), || panic!("an ambient wrapper bypasses configuration")),
             RustcWrapperChain::Interpose(Some(outer))
         );
     }
 
     #[test]
-    fn wrapper_configuration_requires_interposition_to_stand_down() {
-        for key in ["rustc-wrapper", "rustc-workspace-wrapper"] {
-            let text = format!("[build]\n{key} = \"relative-wrapper\"\n");
-            let files = [(".cargo/config.toml", text.as_str())];
-            let (_directory, root) = tree(&files);
-
+    fn configured_outer_wrappers_are_resolved_without_replacing_cargos_workspace_wrapper() {
+        for value in ["wrapper", "tools/wrapper", ""] {
+            let text = format!("[build]\nrustc-wrapper = {value:?}\nrustc-workspace-wrapper = 'tools/workspace-wrapper'\n");
+            let root = Utf8Path::new("wrapper-inputs");
+            let expected = match value {
+                "" => None,
+                "wrapper" => Some("wrapper".into()),
+                _ => Some(root.join(value).into_std_path_buf().into_os_string()),
+            };
             assert_eq!(
-                rustc_wrapper_chain_in(&root, None, &empty(&root)),
-                RustcWrapperChain::StandDown,
-                "{key} was not recognized"
+                configured_wrapper_chain(None, || vec![(toml::from_str(&text).unwrap(), root.join(".cargo/config.toml"),)]),
+                RustcWrapperChain::Interpose(expected)
             );
         }
 
         for key in ["RUSTC_WRAPPER", "CARGO_BUILD_RUSTC_WRAPPER"] {
-            let text = format!("[env]\n{key} = \"relative-wrapper\"\n");
-            let files = [(".cargo/config.toml", text.as_str())];
-            let (_directory, root) = tree(&files);
-
+            let text = format!(
+                "[build]\nrustc-workspace-wrapper = 'tools/workspace-wrapper'\n[env]\n{key} = {{ value = 'child-only-wrapper', force = true }}\n"
+            );
             assert_eq!(
-                rustc_wrapper_chain_in(&root, None, &empty(&root)),
-                RustcWrapperChain::StandDown,
-                "{key} was not recognized"
+                configured_wrapper_chain(None, || vec![(
+                    toml::from_str(&text).unwrap(),
+                    "wrapper-inputs/.cargo/config.toml".into(),
+                )]),
+                RustcWrapperChain::Interpose(None),
+                "[env].{key} changes child environment, not Cargo's selected wrapper"
             );
         }
     }
 
     #[test]
+    fn nov21_backslash_wrapper_paths_are_relative_to_the_declaring_configuration() {
+        let root = Utf8Path::new("wrapper-inputs");
+        assert_eq!(
+            configured_wrapper_chain(None, || vec![(
+                toml::from_str("[build]\nrustc-wrapper = 'tools\\outer-wrapper'\n").unwrap(),
+                root.join(".cargo/config.toml"),
+            )]),
+            RustcWrapperChain::Interpose(Some(root.join(r"tools\outer-wrapper").into_std_path_buf().into_os_string()))
+        );
+    }
+
+    #[test]
+    fn configured_wrappers_keep_the_declaring_directory_and_empty_environment_disables_them() {
+        let root = Utf8Path::new("wrapper-inputs");
+        let mut tables = [
+            (
+                "workspace/.cargo/config.toml",
+                "[build]\nrustc-workspace-wrapper = 'member-wrapper'\n",
+            ),
+            (".cargo/config.toml", "[build]\nrustc-wrapper = 'ancestor/outer-wrapper'\n"),
+            ("home/config.toml", "[build]\nrustc-wrapper = 'bin/home-wrapper'\n"),
+        ]
+        .map(|(origin, contents)| (toml::from_str(contents).unwrap(), root.join(origin)))
+        .to_vec();
+        assert_eq!(
+            configured_wrapper_chain(None, || tables.clone()),
+            RustcWrapperChain::Interpose(Some(root.join("ancestor/outer-wrapper").into_std_path_buf().into_os_string()))
+        );
+        assert_eq!(
+            configured_wrapper_chain(
+                environment_wrapper(|name| match name {
+                    "RUSTC_WRAPPER" => Some("".into()),
+                    "CARGO_BUILD_RUSTC_WRAPPER" => Some("ignored".into()),
+                    _ => None,
+                }),
+                || panic!("an empty environment override must bypass configuration"),
+            ),
+            RustcWrapperChain::Interpose(None)
+        );
+        let _ancestor = tables.remove(1);
+        assert_eq!(
+            configured_wrapper_chain(None, || tables),
+            RustcWrapperChain::Interpose(Some(root.join("bin/home-wrapper").into_std_path_buf().into_os_string()))
+        );
+    }
+
+    #[test]
+    fn malformed_wrapper_configuration_is_left_for_cargo_to_reject() {
+        let (files, root) = tree(&[(".cargo/config.toml", "[build]\nrustc-wrapper = true\n")]);
+        assert_eq!(
+            rustc_wrapper_chain_in(&root, None, &empty(&root), &files.reader()),
+            RustcWrapperChain::StandDown
+        );
+    }
+
+    #[test]
     fn no_wrapper_configuration_allows_direct_interposition() {
-        let (_directory, root) = tree(&[]);
+        let (files, root) = tree(&[]);
 
         assert_eq!(
-            rustc_wrapper_chain_in(&root, None, &empty(&root)),
+            rustc_wrapper_chain_in(&root, None, &empty(&root), &files.reader()),
             RustcWrapperChain::Interpose(None)
         );
     }
 
     #[test]
     fn an_unprojected_cargo_setting_still_moves_the_record_input() {
-        let (_directory, root) = tree(&[(".cargo/config.toml", "[env]\nSUBJECT_MODE = \"one\"\n")]);
-        let before = Build::settings_in(&root, &empty(&root));
+        let (mut files, root) = tree(&[(".cargo/config.toml", "[env]\nSUBJECT_MODE = \"one\"\n")]);
+        let before = Build::settings_in(&root, &empty(&root), &files.reader());
 
-        fs::write(root.join(".cargo/config.toml").as_std_path(), "[env]\nSUBJECT_MODE = \"two\"\n").expect("configuration is writable");
+        files.write(root.join(".cargo/config.toml"), "[env]\nSUBJECT_MODE = \"two\"\n");
 
-        assert_ne!(before, Build::settings_in(&root, &empty(&root)));
+        assert_ne!(before, Build::settings_in(&root, &empty(&root), &files.reader()));
     }
 
     #[test]
     fn a_user_cargo_setting_still_moves_the_record_input() {
-        let (_workspace, root) = tree(&[]);
-        let (_home_directory, home) = tree(&[("config.toml", "[env]\nSUBJECT_MODE = \"one\"\n")]);
+        let (mut files, root) = tree(&[("home/config.toml", "[env]\nSUBJECT_MODE = \"one\"\n")]);
+        let home = root.join("home");
         let environment = Environment {
             cargo_home: Some(home.clone()),
             ..Environment::default()
         };
-        let before = Build::settings_in(&root, &environment);
+        let before = Build::settings_in(&root, &environment, &files.reader());
 
-        fs::write(home.join("config.toml").as_std_path(), "[env]\nSUBJECT_MODE = \"two\"\n").expect("configuration is writable");
+        files.write(home.join("config.toml"), "[env]\nSUBJECT_MODE = \"two\"\n");
 
-        assert_ne!(before, Build::settings_in(&root, &environment));
+        assert_ne!(before, Build::settings_in(&root, &environment, &files.reader()));
     }
 
     /// The record keys on the target before it has a workspace, so this answers from the two
@@ -1460,8 +1562,8 @@ mod tests {
     fn duplicate_configured_targets_still_describe_one_build() {
         let table = toml::from_str("[build]\ntarget = [\"x86_64-pc-windows-msvc\", \"x86_64-pc-windows-msvc\"]\n").unwrap();
         let config = CargoConfig {
-            tables: vec![table],
-            sources: Vec::new(),
+            tables: vec![(table, "synthetic/.cargo/config.toml".into())],
+            ..CargoConfig::default()
         };
 
         assert_eq!(
@@ -1472,14 +1574,16 @@ mod tests {
 
     #[test]
     fn a_passthrough_target_is_read_however_it_is_written() {
-        let (_directory, root) = tree(&[]);
+        let (files, root) = tree(&[]);
 
         assert_eq!(
-            resolve(&root, None, &["--target", "wasm32-unknown-unknown"]).target.as_deref(),
+            resolve(&files, &root, None, &["--target", "wasm32-unknown-unknown"])
+                .target
+                .as_deref(),
             Some("wasm32-unknown-unknown")
         );
         assert_eq!(
-            resolve(&root, None, &["--target=wasm32-unknown-unknown"]).target.as_deref(),
+            resolve(&files, &root, None, &["--target=wasm32-unknown-unknown"]).target.as_deref(),
             Some("wasm32-unknown-unknown")
         );
     }
@@ -1488,35 +1592,37 @@ mod tests {
     /// triple. Reading it as one would describe a build that does not exist.
     #[test]
     fn a_target_directory_is_not_a_target() {
-        let (_directory, root) = tree(&[]);
-        let build = resolve(&root, None, &["--target-dir=elsewhere"]);
+        let (files, root) = tree(&[]);
+        let build = resolve(&files, &root, None, &["--target-dir=elsewhere"]);
 
         assert_eq!(build.target, None);
         assert!(!build.several_targets);
     }
 
     #[test]
-    fn public_resolution_reads_the_workspace_configuration() {
-        let (_directory, root) = tree(&[(".cargo/config.toml", "[build]\ntarget=\"configured-publicly\"\n")]);
+    fn resolution_reads_the_workspace_configuration() {
+        let (files, root) = tree(&[(".cargo/config.toml", "[build]\ntarget=\"configured-publicly\"\n")]);
 
-        assert_eq!(Build::resolve(&root, None, &[]).target.as_deref(), Some("configured-publicly"));
+        assert_eq!(resolve(&files, &root, None, &[]).target.as_deref(), Some("configured-publicly"));
     }
 
     #[test]
     fn the_cargo_configuration_supplies_the_target() {
-        let (_directory, root) = tree(&[(".cargo/config.toml", "[build]\ntarget = \"aarch64-apple-darwin\"\n")]);
+        let (files, root) = tree(&[(".cargo/config.toml", "[build]\ntarget = \"aarch64-apple-darwin\"\n")]);
 
-        assert_eq!(resolve(&root, None, &[]).target.as_deref(), Some("aarch64-apple-darwin"));
+        assert_eq!(resolve(&files, &root, None, &[]).target.as_deref(), Some("aarch64-apple-darwin"));
     }
 
     /// A configured target is what the build uses only until something more specific says
     /// otherwise, which is the same order cargo itself applies.
     #[test]
     fn a_passthrough_target_outranks_the_configured_one() {
-        let (_directory, root) = tree(&[(".cargo/config.toml", "[build]\ntarget = \"aarch64-apple-darwin\"\n")]);
+        let (files, root) = tree(&[(".cargo/config.toml", "[build]\ntarget = \"aarch64-apple-darwin\"\n")]);
 
         assert_eq!(
-            resolve(&root, None, &["--target", "wasm32-unknown-unknown"]).target.as_deref(),
+            resolve(&files, &root, None, &["--target", "wasm32-unknown-unknown"])
+                .target
+                .as_deref(),
             Some("wasm32-unknown-unknown")
         );
     }
@@ -1525,20 +1631,20 @@ mod tests {
     /// them on the way up.
     #[test]
     fn a_configuration_file_above_the_workspace_is_read() {
-        let (_directory, root) = tree(&[(".cargo/config.toml", "[build]\ntarget = \"aarch64-apple-darwin\"\n")]);
+        let (files, root) = tree(&[(".cargo/config.toml", "[build]\ntarget = \"aarch64-apple-darwin\"\n")]);
         let inner = root.join("member");
 
-        fs::create_dir_all(inner.as_std_path()).expect("a member directory");
-
         assert_eq!(
-            Build::resolve_in(&inner, None, &[], &empty(&root)).target.as_deref(),
+            Build::resolve_in(&inner, None, &[], &empty(&root), &files.reader())
+                .target
+                .as_deref(),
             Some("aarch64-apple-darwin")
         );
     }
 
     #[test]
     fn configuration_search_obeys_cargo_precedence_and_reads_every_level() {
-        let (_directory, root) = tree(&[
+        let (files, root) = tree(&[
             (
                 ".cargo/config.toml",
                 "[build]\ntarget = \"near\"\nrustflags = [\"--cfg\", \"near\"]\n",
@@ -1550,15 +1656,36 @@ mod tests {
             ("member/.cargo/config.toml", "[build]\nrustflags = [\"--cfg\", \"member\"]\n"),
             ("member/.cargo/config", "[build]\nrustflags = [\"--cfg\", \"legacy-member\"]\n"),
         ]);
-        let config = CargoConfig::load(&root.join("member"), &empty(&root));
+        let config = CargoConfig::load(&root.join("member"), &empty(&root), &files.reader());
 
-        assert_eq!(config.string(&["build", "target"]), Some("near"));
-        assert_eq!(config.strings(&["build", "rustflags"]), vec!["--cfg", "member", "--cfg", "near"]);
+        assert_eq!(config.string(&["build", "target"]), Some("legacy-near"));
+        assert_eq!(
+            config.strings(&["build", "rustflags"]),
+            vec!["--cfg", "legacy-member", "--cfg", "legacy-near"]
+        );
+    }
+
+    #[test]
+    fn isolated_reads_preserve_root_ancestors_and_a_separate_cargo_home() {
+        let (mut files, root) = tree(&[
+            (".cargo/config.toml", "[build]\nrustflags=['near']\n"),
+            ("home/config.toml", "[build]\nrustflags=['global']\n"),
+        ]);
+        files.write("/.cargo/config.toml".into(), "[build]\nrustflags=['ancestor']\n");
+        let environment = Environment {
+            cargo_home: Some(root.join("home")),
+            ..Environment::default()
+        };
+
+        let config = CargoConfig::load(&root, &environment, &files.reader());
+
+        assert_eq!(config.strings(&["build", "rustflags"]), ["near", "ancestor", "global"]);
+        assert_eq!(config.sources.len(), 3);
     }
 
     #[test]
     fn legacy_configuration_names_are_used_when_toml_is_absent() {
-        let (_directory, root) = tree(&[
+        let (files, root) = tree(&[
             ("workspace/.cargo/config", "[build]\ntarget=\"legacy-workspace\"\n"),
             ("home/config", "[build]\nrustflags=[\"legacy-home\"]\n"),
         ]);
@@ -1567,7 +1694,7 @@ mod tests {
             cargo_home: Some(root.join("home")),
             ..Environment::default()
         };
-        let config = CargoConfig::load(&workspace, &environment);
+        let config = CargoConfig::load(&workspace, &environment, &files.reader());
 
         assert_eq!(config.string(&["build", "target"]), Some("legacy-workspace"));
         assert_eq!(config.strings(&["build", "rustflags"]), vec!["legacy-home"]);
@@ -1575,7 +1702,7 @@ mod tests {
 
     #[test]
     fn user_configuration_is_read_only_when_it_is_outside_the_workspace() {
-        let (_directory, root) = tree(&[
+        let (files, root) = tree(&[
             ("workspace/.cargo/config.toml", "[build]\nrustflags = [\"workspace\"]\n"),
             ("home/config.toml", "[build]\nrustflags = [\"home\"]\n"),
             ("home/config", "[build]\nrustflags = [\"legacy-home\"]\n"),
@@ -1591,25 +1718,25 @@ mod tests {
         };
 
         assert_eq!(
-            CargoConfig::load(&workspace, &outside).strings(&["build", "rustflags"]),
-            vec!["workspace", "home"]
+            CargoConfig::load(&workspace, &outside, &files.reader()).strings(&["build", "rustflags"]),
+            vec!["workspace", "legacy-home"]
         );
         assert_eq!(
-            CargoConfig::load(&workspace, &inside).strings(&["build", "rustflags"]),
+            CargoConfig::load(&workspace, &inside, &files.reader()).strings(&["build", "rustflags"]),
             vec!["workspace"]
         );
     }
 
     #[test]
     fn descendant_non_dot_cargo_home_reaches_resolution_and_record_settings_once() {
-        let (_directory, root) = tree(&[("cargo/config.toml", "[build]\nrustflags = [\"--cfg\", \"from_descendant_home\"]\n")]);
+        let (files, root) = tree(&[("cargo/config.toml", "[build]\nrustflags = [\"--cfg\", \"from_descendant_home\"]\n")]);
         let environment = Environment {
             cargo_home: Some(root.join("cargo")),
             ..Environment::default()
         };
 
-        let build = Build::resolve_in(&root, None, &[], &environment);
-        let settings = Build::settings_in(&root, &environment);
+        let build = Build::resolve_in(&root, None, &[], &environment, &files.reader());
+        let settings = Build::settings_in(&root, &environment, &files.reader());
 
         assert_eq!(build.cfgs, ["from_descendant_home"]);
         assert_eq!(
@@ -1627,8 +1754,8 @@ mod tests {
     fn a_deeply_nested_cargo_cfg_key_is_left_undecided_before_parsing() {
         let predicate = format!("{}unix{}", "all(".repeat(100), ")".repeat(100));
         let config = format!("[target.'cfg({predicate})']\nrustflags = [\"--cfg\", \"deep_guard\"]\n");
-        let (_directory, root) = tree(&[(".cargo/config.toml", &config)]);
-        let build = resolve(&root, None, &[]);
+        let (files, root) = tree(&[(".cargo/config.toml", &config)]);
+        let build = resolve(&files, &root, None, &[]);
 
         assert_eq!(build.cfgs, Vec::<String>::new());
         assert_eq!(build.undecided, ["deep_guard"]);
@@ -1636,11 +1763,11 @@ mod tests {
 
     #[test]
     fn table_keys_are_sorted_and_deduplicated() {
-        let (_directory, root) = tree(&[
+        let (files, root) = tree(&[
             (".cargo/config.toml", "[target.z]\nrustflags=[]\n[target.a]\nrustflags=[]\n"),
             ("member/.cargo/config.toml", "[target.z]\nrustflags=[]\n[target.m]\nrustflags=[]\n"),
         ]);
-        let config = CargoConfig::load(&root.join("member"), &empty(&root));
+        let config = CargoConfig::load(&root.join("member"), &empty(&root), &files.reader());
 
         assert_eq!(config.keys(&["target"]), vec!["a", "m", "z"]);
         assert_eq!(config.keys(&["missing"]).len(), 0);
@@ -1648,22 +1775,23 @@ mod tests {
 
     #[test]
     fn an_absent_configuration_is_not_recorded_as_an_unreadable_one() {
-        let directory = tempfile::tempdir().unwrap();
-        let root = Utf8PathBuf::from_path_buf(directory.path().to_path_buf()).unwrap();
+        let (files, root) = tree(&[]);
         let mut config = CargoConfig::default();
 
-        assert!(!config.include(&root.join("missing.toml")));
+        assert!(!config.include(&root.join("missing.toml"), &files.reader()));
         assert_eq!(config.sources.len(), 0);
         assert_eq!(config.tables.len(), 0);
     }
 
     #[test]
     fn an_unreadable_configuration_is_recorded_as_an_input() {
-        let directory = tempfile::tempdir().unwrap();
-        let root = Utf8PathBuf::from_path_buf(directory.path().to_path_buf()).unwrap();
+        let root = Utf8Path::new("/users/fixture/workspace/.cargo/config.toml");
         let mut config = CargoConfig::default();
 
-        assert!(config.include(&root));
+        assert!(config.include(root, &|path| {
+            assert_eq!(path, root);
+            Err(io::ErrorKind::PermissionDenied.into())
+        }));
         assert_eq!(config.sources.len(), 1);
         assert!(config.sources[0].contains("unreadable"), "{}", config.sources[0]);
         assert_eq!(config.tables.len(), 0);
@@ -1689,8 +1817,9 @@ mod tests {
     /// all rather than evaluated as whichever was written first.
     #[test]
     fn several_targets_are_reported_rather_than_picked_between() {
-        let (_directory, root) = tree(&[]);
+        let (files, root) = tree(&[]);
         let build = resolve(
+            &files,
             &root,
             None,
             &["--target", "wasm32-unknown-unknown", "--target", "aarch64-apple-darwin"],
@@ -1701,6 +1830,7 @@ mod tests {
 
         // The same triple twice is still one target.
         let repeated = resolve(
+            &files,
             &root,
             None,
             &["--target", "wasm32-unknown-unknown", "--target", "wasm32-unknown-unknown"],
@@ -1712,8 +1842,8 @@ mod tests {
 
     #[test]
     fn target_sources_fall_back_in_order_and_are_normalised() {
-        let (_directory, root) = tree(&[(".cargo/config.toml", "[build]\ntarget = [\"z\", \"a\", \"z\"]\n")]);
-        let config = CargoConfig::load(&root, &empty(&root));
+        let (files, root) = tree(&[(".cargo/config.toml", "[build]\ntarget = [\"z\", \"a\", \"z\"]\n")]);
+        let config = CargoConfig::load(&root, &empty(&root), &files.reader());
         let environment = Environment {
             target: Some("environment".to_owned()),
             ..empty(&root)
@@ -1725,11 +1855,11 @@ mod tests {
 
     #[test]
     fn configured_rustflags_carry_their_custom_predicates() {
-        let (_directory, root) = tree(&[(
+        let (files, root) = tree(&[(
             ".cargo/config.toml",
             "[build]\nrustflags = [\"--cfg\", \"loom\", \"-C\", \"target-feature=+avx2\", \"-C\", \"panic=abort\", \"-C\", \"opt-level=3\"]\n",
         )]);
-        let build = resolve(&root, None, &[]);
+        let build = resolve(&files, &root, None, &[]);
 
         assert_eq!(build.cfgs, vec!["loom".to_owned()]);
 
@@ -1742,11 +1872,11 @@ mod tests {
     /// they replace `build.rustflags` rather than adding to them.
     #[test]
     fn a_target_table_supplies_the_flags_for_its_own_triple() {
-        let (_directory, root) = tree(&[(
+        let (files, root) = tree(&[(
             ".cargo/config.toml",
             "[build]\nrustflags = [\"--cfg\", \"everywhere\"]\n\n[target.wasm32-unknown-unknown]\nrustflags = [\"--cfg\", \"woven\"]\n",
         )]);
-        let build = resolve(&root, None, &["--target", "wasm32-unknown-unknown"]);
+        let build = resolve(&files, &root, None, &["--target", "wasm32-unknown-unknown"]);
 
         assert_eq!(build.cfgs, vec!["woven".to_owned()]);
     }
@@ -1758,7 +1888,7 @@ mod tests {
     /// resolve `#[cfg(live)]` code as absent and drop every mutant in it from the population.
     #[test]
     fn the_variable_spelling_of_a_target_table_is_read_and_beats_the_file() {
-        let (_directory, root) = tree(&[(
+        let (files, root) = tree(&[(
             ".cargo/config.toml",
             "[build]\nrustflags = [\"--cfg\", \"everywhere\"]\n\n[target.wasm32-unknown-unknown]\nrustflags = [\"--cfg\", \"filed\"]\n",
         )]);
@@ -1767,7 +1897,7 @@ mod tests {
             ..empty(&root)
         };
         let extra = ["--target".to_owned(), "wasm32-unknown-unknown".to_owned()];
-        let build = Build::resolve_in(&root, None, &extra, &environment);
+        let build = Build::resolve_in(&root, None, &extra, &environment, &files.reader());
 
         assert_eq!(build.cfgs, vec!["live".to_owned()]);
     }
@@ -1776,14 +1906,17 @@ mod tests {
     /// case a reader that only ever walked the `[target.…]` tables could not reach.
     #[test]
     fn a_target_variable_applies_with_no_table_to_hang_it_on() {
-        let (_directory, root) = tree(&[(".cargo/config.toml", "[build]\nrustflags = [\"--cfg\", \"everywhere\"]\n")]);
+        let (files, root) = tree(&[(".cargo/config.toml", "[build]\nrustflags = [\"--cfg\", \"everywhere\"]\n")]);
         let environment = Environment {
             target_rustflags: core::iter::once(("WASM32_UNKNOWN_UNKNOWN".to_owned(), "--cfg live".to_owned())).collect(),
             ..empty(&root)
         };
         let extra = ["--target".to_owned(), "wasm32-unknown-unknown".to_owned()];
 
-        assert_eq!(Build::resolve_in(&root, None, &extra, &environment).cfgs, vec!["live".to_owned()]);
+        assert_eq!(
+            Build::resolve_in(&root, None, &extra, &environment, &files.reader()).cfgs,
+            vec!["live".to_owned()]
+        );
 
         // A variable naming some other triple is not in force and decides nothing.
         let elsewhere = Environment {
@@ -1792,7 +1925,7 @@ mod tests {
         };
 
         assert_eq!(
-            Build::resolve_in(&root, None, &extra, &elsewhere).cfgs,
+            Build::resolve_in(&root, None, &extra, &elsewhere, &files.reader()).cfgs,
             vec!["everywhere".to_owned()]
         );
     }
@@ -1830,11 +1963,11 @@ mod tests {
     /// gate stays in the population instead of being deleted on a guess.
     #[test]
     fn a_predicate_gated_table_leaves_its_names_unanswerable() {
-        let (_directory, root) = tree(&[(
+        let (files, root) = tree(&[(
             ".cargo/config.toml",
             "[build]\nrustflags = [\"--cfg\", \"everywhere\"]\n\n[target.'cfg(target_os = \"redox\")']\nrustflags = [\"--cfg\", \"sometimes\"]\n",
         )]);
-        let build = resolve(&root, None, &[]);
+        let build = resolve(&files, &root, None, &[]);
 
         assert_eq!(build.cfgs, vec!["everywhere".to_owned()]);
         assert_eq!(build.undecided, vec!["sometimes".to_owned()]);
@@ -1842,11 +1975,11 @@ mod tests {
 
     #[test]
     fn a_valued_predicate_in_a_gated_table_leaves_its_bare_name_unanswerable() {
-        let (_directory, root) = tree(&[(
+        let (files, root) = tree(&[(
             ".cargo/config.toml",
             "[target.'cfg(target_os = \"redox\")']\nrustflags = [\"--cfg\", \"flavor=\\\"strawberry\\\"\"]\n",
         )]);
-        let build = resolve(&root, None, &[]);
+        let build = resolve(&files, &root, None, &[]);
 
         assert_eq!(build.undecided, vec!["flavor".to_owned()]);
     }
@@ -1857,13 +1990,13 @@ mod tests {
     /// probe, so the predicates they decide are answered from the compiler's own defaults instead.
     #[test]
     fn a_matching_predicate_table_is_joined_with_the_triples_own() {
-        let (_directory, root) = tree(&[(
+        let (files, root) = tree(&[(
             ".cargo/config.toml",
             "[target.wasm32-unknown-unknown]\nrustflags = [\"--cfg\", \"triple\"]\n\n\
              [target.'cfg(target_family = \"wasm\")']\nrustflags = [\"--cfg\", \"family\"]\n\n\
              [target.'cfg(target_os = \"linux\")']\nrustflags = [\"--cfg\", \"elsewhere\"]\n",
         )]);
-        let build = resolve(&root, None, &["--target", "wasm32-unknown-unknown"]);
+        let build = resolve(&files, &root, None, &["--target", "wasm32-unknown-unknown"]);
 
         assert!(build.cfgs.contains(&"triple".to_owned()), "{:?}", build.cfgs);
         assert!(build.cfgs.contains(&"family".to_owned()), "{:?}", build.cfgs);
@@ -1883,11 +2016,11 @@ mod tests {
     /// about a different compilation — so the name is unanswerable instead.
     #[test]
     fn a_table_this_build_does_not_read_leaves_its_codegen_predicates_unanswerable() {
-        let (_directory, root) = tree(&[(
+        let (files, root) = tree(&[(
             ".cargo/config.toml",
             "[target.wasm32-unknown-unknown]\nrustflags = [\"-C\", \"debug-assertions=off\", \"-C\", \"panic=abort\", \"-C\", \"target-feature=+simd128\"]\n",
         )]);
-        let build = resolve(&root, None, &[]);
+        let build = resolve(&files, &root, None, &[]);
 
         assert_eq!(
             build.undecided,
@@ -1901,7 +2034,7 @@ mod tests {
     /// predicates the other contradicts.
     #[test]
     fn the_build_rustflags_variable_ranks_below_the_target_tables() {
-        let (_directory, root) = tree(&[(
+        let (files, root) = tree(&[(
             ".cargo/config.toml",
             "[target.wasm32-unknown-unknown]\nrustflags = [\"--cfg\", \"tabled\"]\n",
         )]);
@@ -1910,7 +2043,7 @@ mod tests {
             build_rustflags: Some("--cfg from_the_variable".to_owned()),
             ..empty(&root)
         };
-        let build = Build::resolve_in(&root, None, &[], &environment);
+        let build = Build::resolve_in(&root, None, &[], &environment, &files.reader());
 
         assert_eq!(build.cfgs, vec!["tabled".to_owned()]);
     }
@@ -1919,12 +2052,12 @@ mod tests {
     /// an environment variable is the more specific statement of the same setting.
     #[test]
     fn the_build_rustflags_variable_outranks_the_configured_build_rustflags() {
-        let (_directory, root) = tree(&[(".cargo/config.toml", "[build]\nrustflags = [\"--cfg\", \"configured\"]\n")]);
+        let (files, root) = tree(&[(".cargo/config.toml", "[build]\nrustflags = [\"--cfg\", \"configured\"]\n")]);
         let environment = Environment {
             build_rustflags: Some("--cfg from_the_variable".to_owned()),
             ..empty(&root)
         };
-        let build = Build::resolve_in(&root, None, &[], &environment);
+        let build = Build::resolve_in(&root, None, &[], &environment, &files.reader());
 
         assert_eq!(build.cfgs, vec!["from_the_variable".to_owned()]);
 
@@ -1938,6 +2071,7 @@ mod tests {
                 build_rustflags: Some("--cfg from_the_variable".to_owned()),
                 ..empty(&root)
             },
+            &files.reader(),
         );
 
         assert_eq!(outranked.cfgs, vec!["plain".to_owned()]);
@@ -1945,12 +2079,12 @@ mod tests {
 
     #[test]
     fn the_environment_outranks_the_configuration_files() {
-        let (_directory, root) = tree(&[(".cargo/config.toml", "[build]\nrustflags = [\"--cfg\", \"configured\"]\n")]);
+        let (files, root) = tree(&[(".cargo/config.toml", "[build]\nrustflags = [\"--cfg\", \"configured\"]\n")]);
         let environment = Environment {
             rustflags: Some("--cfg loom -C debug-assertions=off".to_owned()),
             ..empty(&root)
         };
-        let build = Build::resolve_in(&root, None, &[], &environment);
+        let build = Build::resolve_in(&root, None, &[], &environment, &files.reader());
 
         assert_eq!(build.cfgs, vec!["loom".to_owned()]);
         assert_eq!(build.debug_assertions, Some(false), "the flags say so outright");
@@ -1958,24 +2092,27 @@ mod tests {
 
     #[test]
     fn cargo_build_rustflags_are_used_when_the_other_variables_are_absent() {
-        let (_directory, root) = tree(&[(".cargo/config.toml", "[build]\nrustflags = [\"--cfg\", \"configured\"]\n")]);
+        let (files, root) = tree(&[(".cargo/config.toml", "[build]\nrustflags = [\"--cfg\", \"configured\"]\n")]);
         let environment = Environment {
             build_rustflags: Some("--cfg environment".to_owned()),
             ..empty(&root)
         };
 
-        assert_eq!(Build::resolve_in(&root, None, &[], &environment).cfgs, vec!["environment"]);
+        assert_eq!(
+            Build::resolve_in(&root, None, &[], &environment, &files.reader()).cfgs,
+            vec!["environment"]
+        );
     }
 
     #[test]
     fn target_table_uncertainty_is_sorted_deduplicated_and_excludes_the_chosen_flags() {
-        let (_directory, root) = tree(&[(
+        let (files, root) = tree(&[(
             ".cargo/config.toml",
             "[target.chosen]\nrustflags=[\"--cfg\", \"same\"]\n\
              [target.z]\nrustflags=[\"--cfg\", \"maybe\", \"--cfg\", \"maybe\"]\n\
              [target.a]\nrustflags=[\"--cfg\", \"alpha\"]\n",
         )]);
-        let build = resolve(&root, None, &["--target", "chosen"]);
+        let build = resolve(&files, &root, None, &["--target", "chosen"]);
 
         assert_eq!(build.cfgs, vec!["same"]);
         assert_eq!(build.undecided, vec!["alpha", "maybe"]);
@@ -1985,13 +2122,13 @@ mod tests {
     /// space-separated one; splitting it on spaces would tear one flag into two.
     #[test]
     fn encoded_flags_are_split_on_the_unit_separator() {
-        let (_directory, root) = tree(&[]);
+        let (files, root) = tree(&[]);
         let environment = Environment {
             encoded_rustflags: Some("--cfg\u{1f}flavor=\"two words\"\u{1f}".to_owned()),
             rustflags: Some("--cfg ignored".to_owned()),
             ..empty(&root)
         };
-        let build = Build::resolve_in(&root, None, &[], &environment);
+        let build = Build::resolve_in(&root, None, &[], &environment, &files.reader());
 
         assert_eq!(build.cfgs, vec!["flavor=\"two words\"".to_owned()]);
     }
@@ -2071,8 +2208,11 @@ mod tests {
     #[test]
     fn oct25_host_lookup_owns_cache_and_preserves_outer_asked_about_policy() {
         let with_target = CargoConfig {
-            tables: vec![toml::from_str("[target.host]\nrustflags=[]\n").expect("the fixture parses")],
-            sources: Vec::new(),
+            tables: vec![(
+                toml::from_str("[target.host]\nrustflags=[]\n").expect("the fixture parses"),
+                "synthetic/.cargo/config.toml".into(),
+            )],
+            ..CargoConfig::default()
         };
         for (config, asked) in [(&with_target, false), (&CargoConfig::default(), true)] {
             let cache = std::sync::OnceLock::new();
@@ -2117,98 +2257,101 @@ mod tests {
     /// A run that names no profile builds with `cargo test`, whose profile inherits `dev`.
     #[test]
     fn the_default_profile_has_debug_assertions_on() {
-        let (_directory, root) = tree(&[]);
+        let (files, root) = tree(&[]);
 
-        assert_eq!(resolve(&root, None, &[]).debug_assertions, Some(true));
+        assert_eq!(resolve(&files, &root, None, &[]).debug_assertions, Some(true));
     }
 
     #[test]
     fn the_release_profile_has_them_off() {
-        let (_directory, root) = tree(&[]);
+        let (files, root) = tree(&[]);
 
-        assert_eq!(resolve(&root, Some("release"), &[]).debug_assertions, Some(false));
-        assert_eq!(resolve(&root, None, &["--release"]).debug_assertions, Some(false));
-        assert_eq!(resolve(&root, None, &["--profile", "bench"]).debug_assertions, Some(false));
+        assert_eq!(resolve(&files, &root, Some("release"), &[]).debug_assertions, Some(false));
+        assert_eq!(resolve(&files, &root, None, &["--release"]).debug_assertions, Some(false));
+        assert_eq!(resolve(&files, &root, None, &["--profile", "bench"]).debug_assertions, Some(false));
     }
 
     /// A passthrough `--profile` is the run's own last word, above whatever was configured.
     #[test]
     fn a_passthrough_profile_outranks_the_configured_one() {
-        let (_directory, root) = tree(&[]);
+        let (files, root) = tree(&[]);
 
-        assert_eq!(resolve(&root, Some("dev"), &["--profile=release"]).debug_assertions, Some(false));
+        assert_eq!(
+            resolve(&files, &root, Some("dev"), &["--profile=release"]).debug_assertions,
+            Some(false)
+        );
     }
 
     #[test]
     fn a_custom_profile_follows_what_it_inherits() {
-        let (_directory, root) = tree(&[(
+        let (files, root) = tree(&[(
             "Cargo.toml",
             "[workspace]\n\n[profile.mutants]\ninherits = \"release\"\n\n[profile.loud]\ninherits = \"dev\"\n",
         )]);
 
-        assert_eq!(resolve(&root, Some("mutants"), &[]).debug_assertions, Some(false));
-        assert_eq!(resolve(&root, Some("loud"), &[]).debug_assertions, Some(true));
+        assert_eq!(resolve(&files, &root, Some("mutants"), &[]).debug_assertions, Some(false));
+        assert_eq!(resolve(&files, &root, Some("loud"), &[]).debug_assertions, Some(true));
     }
 
     #[test]
     fn a_profile_that_switches_them_on_is_believed_over_what_it_inherits() {
-        let (_directory, root) = tree(&[(
+        let (files, root) = tree(&[(
             "Cargo.toml",
             "[workspace]\n\n[profile.mutants]\ninherits = \"release\"\ndebug-assertions = true\n",
         )]);
 
-        assert_eq!(resolve(&root, Some("mutants"), &[]).debug_assertions, Some(true));
+        assert_eq!(resolve(&files, &root, Some("mutants"), &[]).debug_assertions, Some(true));
     }
 
     #[test]
     fn the_underscore_spelling_of_debug_assertions_is_accepted() {
-        let (_directory, root) = tree(&[(
+        let (files, root) = tree(&[(
             "Cargo.toml",
             "[workspace]\n\n[profile.mutants]\ninherits = \"release\"\ndebug_assertions = true\n",
         )]);
 
-        assert_eq!(resolve(&root, Some("mutants"), &[]).debug_assertions, Some(true));
+        assert_eq!(resolve(&files, &root, Some("mutants"), &[]).debug_assertions, Some(true));
     }
 
     /// The cargo configuration can override the manifest's profile tables, so it is asked first.
     #[test]
     fn a_configured_profile_overrides_the_manifest() {
-        let (_directory, root) = tree(&[
+        let (files, root) = tree(&[
             ("Cargo.toml", "[workspace]\n\n[profile.release]\ndebug-assertions = true\n"),
             (".cargo/config.toml", "[profile.release]\ndebug-assertions = false\n"),
         ]);
 
-        assert_eq!(resolve(&root, Some("release"), &[]).debug_assertions, Some(false));
+        assert_eq!(resolve(&files, &root, Some("release"), &[]).debug_assertions, Some(false));
     }
 
     /// A profile nothing describes is unanswerable rather than assumed, because assuming either
     /// answer deletes one half of every `#[cfg(debug_assertions)]` from the population.
     #[test]
     fn a_profile_that_cannot_be_followed_is_left_unanswered() {
-        let (_directory, root) = tree(&[("Cargo.toml", "[workspace]\n")]);
+        let (files, root) = tree(&[("Cargo.toml", "[workspace]\n")]);
 
-        assert_eq!(resolve(&root, Some("nowhere"), &[]).debug_assertions, None);
+        assert_eq!(resolve(&files, &root, Some("nowhere"), &[]).debug_assertions, None);
     }
 
     #[test]
     fn a_missing_parent_is_not_replaced_with_the_empty_profile() {
-        let (_directory, root) = tree(&[(
+        let (files, root) = tree(&[(
             "Cargo.toml",
             "[workspace]\n\n[profile.custom]\n\n[profile.\"\"]\ndebug-assertions = true\n",
         )]);
 
-        assert_eq!(resolve(&root, Some("custom"), &[]).debug_assertions, None);
+        assert_eq!(resolve(&files, &root, Some("custom"), &[]).debug_assertions, None);
     }
 
     /// A profile that inherits from itself is malformed, and must not spin.
     #[test]
     fn a_cyclic_profile_chain_terminates() {
-        let (_directory, root) = tree(&[(
+        let (files, root) = tree(&[(
             "Cargo.toml",
             "[workspace]\n\n[profile.a]\ninherits = \"b\"\n\n[profile.b]\ninherits = \"a\"\n",
         )]);
 
-        assert_eq!(resolve(&root, Some("a"), &[]).debug_assertions, None);
+        assert_eq!(resolve(&files, &root, Some("a"), &[]).debug_assertions, None);
     }
 
     fn profile_chain(length: usize, switched_at: usize) -> String {
@@ -2230,9 +2373,9 @@ mod tests {
     fn profile_chain_iteration_starts_at_zero_and_ends_before_the_limit() {
         for (switched_at, expected) in [(0, Some(true)), (PROFILE_DEPTH - 1, Some(true)), (PROFILE_DEPTH, None)] {
             let manifest = profile_chain(PROFILE_DEPTH, switched_at);
-            let (_directory, root) = tree(&[("Cargo.toml", &manifest)]);
+            let (files, root) = tree(&[("Cargo.toml", &manifest)]);
 
-            assert_eq!(resolve(&root, Some("p0"), &[]).debug_assertions, expected);
+            assert_eq!(resolve(&files, &root, Some("p0"), &[]).debug_assertions, expected);
         }
     }
 
@@ -2240,9 +2383,18 @@ mod tests {
     /// same direction every other uncertainty here resolves in.
     #[test]
     fn an_unparsable_configuration_file_is_ignored() {
-        let (_directory, root) = tree(&[(".cargo/config.toml", "[build\ntarget =\n")]);
+        let (files, root) = tree(&[(".cargo/config.toml", "[build\ntarget =\n")]);
 
-        assert_eq!(resolve(&root, None, &[]).target, None);
+        assert_eq!(resolve(&files, &root, None, &[]).target, None);
+    }
+
+    #[test]
+    fn a_non_utf8_manifest_leaves_the_default_profile_assertions_unchanged() {
+        let (mut files, root) = tree(&[]);
+        let _previous = files.0.insert(root.join("Cargo.toml"), vec![0xff]);
+
+        assert_eq!(resolve(&files, &root, None, &[]).debug_assertions, Some(true));
+        assert_eq!(resolve(&files, &root, Some("release"), &[]).debug_assertions, Some(false));
     }
 
     #[test]

@@ -24,6 +24,7 @@
 //! diagnostic naming it, rather than parsed into a stack overflow that names nothing.
 
 mod comment;
+mod extent;
 // `pub` (within this private module) so the crate's proc-macro agreement test can reach
 // `nesting::NESTING_LIMIT` and `nesting::CHAIN_FACTOR` through the `internals` facade.
 pub mod nesting;
@@ -32,6 +33,8 @@ mod source_file;
 #[doc(inline)]
 pub use comment::{Comment, CommentKind};
 pub(crate) use comment::{comment_spans, literal_end};
+pub(crate) use extent::Extent;
+pub(crate) use source_file::shebang_as_whitespace;
 #[doc(hidden)]
 pub use source_file::{BOM, strip_bom};
 #[doc(inline)]

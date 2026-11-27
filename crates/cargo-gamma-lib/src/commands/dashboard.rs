@@ -24,8 +24,11 @@ use crate::report::{Styler, encode_controls};
 
 const REDRAW_INTERVAL: Duration = Duration::from_secs(1);
 const THROUGHPUT_WINDOW: Duration = Duration::from_mins(5);
+/// Clamp for compact rendering when the terminal is narrower or reports no usable width.
 const MINIMUM_WIDTH: usize = 40;
+/// Switch to detailed single-column metrics at a conventional terminal width.
 const MEDIUM_WIDTH: usize = 80;
+/// Switch to the two-panel layout, leaving room for both panels and their gap.
 const LARGE_WIDTH: usize = 136;
 const COLUMN_GAP: &str = "   ";
 /// A ten-cell side keeps the large-population waffle at one cell per percentage point.
@@ -829,7 +832,7 @@ fn visible_width(text: &str) -> usize {
 fn square_columns(cells: usize) -> usize {
     let mut columns = 1usize;
     while columns.saturating_mul(columns) < cells {
-        // #[gamma::skip(all, reason = "removing the positive increment makes the dashboard calculation non-terminating for every population larger than one")]
+        // #[gamma::skip(stmt.delete_assign, literal.int_decrement, literal.int_to_zero, tag = "timeout", reason = "these changes leave columns unchanged, so the loop cannot finish when cells exceeds one")]
         columns = columns.saturating_add(1);
     }
     columns.min(WAFFLE_SIDE)
@@ -1493,6 +1496,8 @@ mod tests {
         let repaint = str::from_utf8(&host.err[first_draw..]).expect("dashboard output is UTF-8");
         assert!(repaint.starts_with(BEGIN_SYNCHRONIZED_UPDATE), "{repaint:?}");
         assert!(repaint.ends_with(END_SYNCHRONIZED_UPDATE), "{repaint:?}");
+        assert_eq!(repaint.matches(BEGIN_SYNCHRONIZED_UPDATE).count(), 1, "{repaint:?}");
+        assert_eq!(repaint.matches(END_SYNCHRONIZED_UPDATE).count(), 1, "{repaint:?}");
         assert!(repaint.contains(&format!("\r\x1b[{}A{ERASE_TO_END}", rows - 1)), "{repaint:?}");
         assert!(!repaint.contains("\x1b7"), "{repaint:?}");
         assert!(!repaint.contains("\x1b8"), "{repaint:?}");

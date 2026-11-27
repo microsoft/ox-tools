@@ -15,8 +15,8 @@ pub fn tuple_assignment(value: &mut (u8, Duration), delta: Duration) {
     value.1 += delta;
 }
 
-pub fn timestamp(value: chrono::DateTime<chrono::Utc>) -> chrono::DateTime<chrono::Utc> {
-    value - chrono::Duration::days(90)
+pub fn timestamp(value: Instant) -> Instant {
+    value - Duration::from_secs(7_776_000)
 }
 
 pub fn closure_clock(budget: Duration) -> Instant {

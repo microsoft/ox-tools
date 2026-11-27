@@ -21,7 +21,7 @@ use serde_json::Value;
 use super::blame::AttributionEvidence;
 use super::complaints::Diagnostic;
 use super::invoke::{
-    BuildProcess, OutputLimits, Stream, compile, drained, finish_readers, is_progress, read_pipe, read_pipe_with_limits,
+    BuildProcess, OutputLimits, Pipe, Stream, compile, finish_readers, finish_readers_with, is_progress, read_pipe, read_pipe_with_limits,
     rendered_diagnostic, spawn_failure, supervise, supervise_with_limits, wait_for_build,
 };
 use super::messages::{build_evidence, dep_files};
@@ -231,6 +231,21 @@ fn cross_target_proof_plan(work: &Workspace, path: &Utf8Path, source: &str) -> P
     plan
 }
 
+fn cross_target_proof_diagnostic(target: &str) -> String {
+    serde_json::json!({
+        "reason": "compiler-message",
+        "package_id": "trivial 0.0.0",
+        "target": {"name": target, "kind": ["test"]},
+        "message": {
+            "level": "error",
+            "message": "target-specific type error",
+            "code": {"code": "E0308"},
+            "spans": [{"file_name": "lib.rs", "is_primary": true}]
+        }
+    })
+    .to_string()
+}
+
 #[test]
 fn convergence_prefers_singleton_proof_to_an_earlier_cross_target_interaction_and_records_proof_time() {
     let directory = tempfile::tempdir().unwrap();
@@ -290,11 +305,12 @@ fn convergence_prefers_singleton_proof_to_an_earlier_cross_target_interaction_an
                     Duration::from_millis(11)
                 };
                 control.advance(elapsed);
-                Ok(Some(scripted_output(
-                    !failed,
-                    if target.is_none() && failed { &diagnostics } else { "" },
-                    "",
-                )))
+                let stdout = match (target, failed) {
+                    (None, true) => diagnostics.clone(),
+                    (Some(target), true) => cross_target_proof_diagnostic(target),
+                    _ => String::new(),
+                };
+                Ok(Some(scripted_output(!failed, &stdout, "")))
             }
         },
         || {
@@ -1610,7 +1626,7 @@ fn the_reader_splits_on_carriage_returns_as_well_as_newlines() {
 
 /// A pipe that fails part way through is not a stream that ended.
 ///
-/// `supervise` refuses a build whose readers did not finish, because a truncated JSON stream loses
+/// `supervise` refuses a build whose readers are incomplete, because a truncated JSON stream loses
 /// artifacts and a run that lost them reports the test binaries it could not find as ones that do
 /// not exist, and excuses the mutants in files it could not see as never built. A reader that
 /// stopped on an `EIO` and handed back what it had would walk in through the one door that guard
@@ -1637,11 +1653,50 @@ fn a_pipe_that_fails_part_way_is_not_read_as_the_end_of_the_stream() {
 
     let (sender, _lines) = mpsc::sync_channel(64);
     let reader = read_pipe(Faltering(false), Stream::Json, &sender).expect("spawn reader");
+    let stdout = reader
+        .join()
+        .expect("the scripted reader returns an I/O error rather than panicking");
+    assert!(!stdout.complete, "a failed read must not be passed off as complete");
+}
 
-    assert!(
-        drained(Some(reader), Instant::now() + Duration::from_secs(5)).is_none(),
-        "a reader that stopped on an error must not pass its bytes off as the whole stream"
+#[test]
+fn build_readers_abandon_a_blocked_pipe_at_the_production_drain_deadline() {
+    let (release, blocked) = mpsc::channel::<()>();
+    let (ended, completion) = mpsc::channel();
+    let reader = std::thread::spawn(move || {
+        blocked
+            .recv()
+            .expect("the test releases the blocked reader after observing the deadline");
+        ended.send(()).expect("the test waits for reader cleanup");
+        Pipe {
+            text: Vec::new(),
+            complete: true,
+            within_limits: true,
+        }
+    });
+    let (_sender, lines) = mpsc::sync_channel(1);
+    let control = tick::ClockControl::new();
+    let clock = control.to_clock();
+    let deadline = clock.instant() + Duration::from_millis(20);
+    let mut pauses = Vec::new();
+    let (stdout, stderr) = finish_readers_with(
+        Some(Ok(reader)),
+        None,
+        &lines,
+        &mut crate::testing::Recorder::default(),
+        deadline,
+        || clock.instant(),
+        |duration| {
+            assert!(pauses.is_empty(), "one production backoff reaches the controlled drain deadline");
+            pauses.push(duration);
+            control.advance(duration);
+        },
     );
+    release.send(()).expect("the reader is retained until supervision stops");
+    completion.recv().expect("the released reader completes");
+    assert!(stdout.is_none() && stderr.is_none());
+    assert_eq!(clock.instant(), deadline);
+    assert_eq!(pauses, [Duration::from_millis(20)]);
 }
 
 /// A small configurable limit lets the failure path be tested without allocating megabytes.
@@ -1832,6 +1887,88 @@ fn convergence_still_checks_a_library_without_a_test_harness() -> Result<()> {
     assert_eq!(build.binaries.len(), 1);
     assert_eq!(build.binaries[0].target, "library_dependency");
     Ok(())
+}
+
+#[test]
+fn finish_keeps_all_frozen_root_specs_when_only_one_root_produces_a_test_binary() {
+    let mut work = policy_workspace();
+    work.cargo.features = vec!["--all-features".to_owned()];
+    let mut plan = empty_plan(&work);
+    plan.specs
+        .insert("selected".to_owned(), (Utf8PathBuf::from("selected"), "1.0.0".to_owned()));
+    plan.specs
+        .insert("feature-root".to_owned(), (Utf8PathBuf::from("feature-root"), "2.0.0".to_owned()));
+    plan.mutants.push(Mutant {
+        package: "selected".to_owned().into(),
+        file: Utf8PathBuf::from("selected/src/lib.rs").into(),
+        ..mutant()
+    });
+
+    let frozen_roots = ["selected".to_owned(), "feature-root".to_owned()];
+    let selected = ["selected".to_owned()];
+    let workspace_spec = if cfg!(windows) {
+        "path+file:///C:/synthetic/build-policy"
+    } else {
+        "path+file:///synthetic/build-policy"
+    };
+    let expected_packages = vec![
+        format!("{workspace_spec}/selected#selected@1.0.0"),
+        format!("{workspace_spec}/feature-root#feature-root@2.0.0"),
+    ];
+    let expected_command_packages = expected_packages.clone();
+    let observed_commands = Rc::new(RefCell::new(Vec::new()));
+    let record_command = Rc::clone(&observed_commands);
+    let executable = work.target.join("debug/deps/selected-test");
+    let artifact = serde_json::json!({
+        "reason": "compiler-artifact",
+        "package_id": expected_packages[0].as_str(),
+        "profile": {"test": true},
+        "target": {"name": "selected", "kind": ["test"]},
+        "executable": executable.as_str(),
+    })
+    .to_string();
+
+    let build = with_compiler(
+        move |_work, arguments, _budget, _events| {
+            let packages = arguments
+                .windows(2)
+                .filter(|pair| pair[0] == "--package")
+                .map(|pair| pair[1].clone())
+                .collect::<Vec<_>>();
+            assert_eq!(packages, expected_command_packages);
+            assert!(arguments.iter().any(|argument| argument == "--all-features"));
+            assert!(!arguments.iter().any(|argument| argument == "--workspace"));
+
+            let verb = arguments[0].clone();
+            let stdout = match verb.as_str() {
+                "check" => "",
+                "build" => artifact.as_str(),
+                other => panic!("unexpected Cargo verb: {other}"),
+            };
+            record_command.borrow_mut().push((verb, packages));
+
+            Ok(Some(scripted_output(true, stdout, "")))
+        },
+        || {
+            let mut converger = Converger::default();
+            converger.freeze_context(Some(&frozen_roots));
+            converger.finish(&work, &mut plan, Some(&selected), BuildLimits::default(), &mut Recorder::default())
+        },
+    )
+    .expect("the scripted build succeeds");
+
+    assert_eq!(
+        observed_commands.borrow().as_slice(),
+        &[
+            ("check".to_owned(), expected_packages.clone()),
+            ("build".to_owned(), expected_packages.clone()),
+        ]
+    );
+    let retained_binaries = build.binaries.iter().map(|binary| binary.package.as_str()).collect::<Vec<_>>();
+    assert_eq!(
+        (build.stuck.is_none(), build.packages, retained_binaries),
+        (true, Some(expected_packages), vec!["selected"])
+    );
 }
 
 /// A build that fails for a reason no guard explains stops rather than looping forever.
@@ -4203,6 +4340,9 @@ fn a_wider_enclosing_diagnostic_processed_after_a_narrower_one_does_not_replace_
 #[test]
 fn diagnostics_are_matched_by_suffix_when_cargo_spells_paths_differently() {
     let mut guards = Guards::default();
+    let base = Utf8Path::new(env!("CARGO_MANIFEST_DIR"));
+    let root = base.join("scratch/tree");
+    let external = base.join("elsewhere/crates/pkg/src/lib.rs");
 
     let _old = guards.insert(
         1,
@@ -4212,13 +4352,8 @@ fn diagnostics_are_matched_by_suffix_when_cargo_spells_paths_differently() {
         ),
     );
 
-    // Cargo can report an absolute or otherwise differently-rooted path; suffix matching keeps
-    // those diagnostics attributable rather than losing the whole run.
-    let blamed = ordinals_blamed(
-        &compiler_message(&[span("/elsewhere/crates/pkg/src/lib.rs", 5, 6, 5, 8, true)]),
-        Utf8Path::new("/scratch/tree"),
-        &guards,
-    );
+    // Cargo can report an absolute path outside the scratch tree.
+    let blamed = ordinals_blamed(&compiler_message(&[span(external.as_str(), 5, 6, 5, 8, true)]), &root, &guards);
 
     assert_eq!(blamed, HashSet::from_iter([1]));
 }
@@ -4461,10 +4596,10 @@ fn only_the_dep_info_belonging_to_this_build_is_read() {
     let deps = Utf8PathBuf::from_path_buf(dir.path().join("deps")).expect("utf8");
 
     fs::create_dir_all(deps.as_std_path()).expect("deps");
-    fs::write(deps.join("mine-aaaa.d").as_std_path(), "x: src/kept.rs\n").expect("mine");
+    fs::write(deps.join("mine-aaaaaaaaaaaaaaaa.d").as_std_path(), "x: src/kept.rs\n").expect("mine");
     fs::write(deps.join("stale-bbbb.d").as_std_path(), "x: src/gone.rs\n").expect("stale");
 
-    let stdout = artifact_message(&deps.join("libmine-aaaa.rmeta"));
+    let stdout = artifact_message(&deps.join("libmine-aaaaaaaaaaaaaaaa.rmeta"));
 
     let compiled = compiled_sources(&stdout, Utf8Path::new("/nowhere")).expect("read something");
 
@@ -4484,9 +4619,13 @@ fn a_dependency_path_containing_an_escaped_space_is_read_as_one_path() {
     let deps = Utf8PathBuf::from_path_buf(dir.path().join("deps")).expect("utf8");
 
     fs::create_dir_all(deps.as_std_path()).expect("deps");
-    fs::write(deps.join("mine-aaaa.d").as_std_path(), "x.rmeta: src/lib.rs src/my\\ file.rs\n").expect("mine");
+    fs::write(
+        deps.join("mine-aaaaaaaaaaaaaaaa.d").as_std_path(),
+        "x.rmeta: src/lib.rs src/my\\ file.rs\n",
+    )
+    .expect("mine");
 
-    let stdout = artifact_message(&deps.join("libmine-aaaa.rmeta"));
+    let stdout = artifact_message(&deps.join("libmine-aaaaaaaaaaaaaaaa.rmeta"));
 
     let compiled = compiled_sources(&stdout, Utf8Path::new("/nowhere")).expect("read something");
 
@@ -4506,9 +4645,9 @@ fn a_backslash_that_is_not_an_escape_survives_into_the_path() {
     let deps = Utf8PathBuf::from_path_buf(dir.path().join("deps")).expect("utf8");
 
     fs::create_dir_all(deps.as_std_path()).expect("deps");
-    fs::write(deps.join("mine-aaaa.d").as_std_path(), "x.rmeta: src\\my\\ file.rs\n").expect("mine");
+    fs::write(deps.join("mine-aaaaaaaaaaaaaaaa.d").as_std_path(), "x.rmeta: src\\my\\ file.rs\n").expect("mine");
 
-    let stdout = artifact_message(&deps.join("libmine-aaaa.rmeta"));
+    let stdout = artifact_message(&deps.join("libmine-aaaaaaaaaaaaaaaa.rmeta"));
 
     let compiled = compiled_sources(&stdout, Utf8Path::new("/nowhere")).expect("read something");
 
@@ -4529,9 +4668,13 @@ fn a_mutant_in_a_file_whose_path_contains_a_space_is_not_excused_as_unbuilt() {
     let deps = Utf8PathBuf::from_path_buf(dir.path().join("deps")).expect("utf8");
 
     fs::create_dir_all(deps.as_std_path()).expect("deps");
-    fs::write(deps.join("mine-aaaa.d").as_std_path(), "x.rmeta: src/lib.rs src/my\\ file.rs\n").expect("mine");
+    fs::write(
+        deps.join("mine-aaaaaaaaaaaaaaaa.d").as_std_path(),
+        "x.rmeta: src/lib.rs src/my\\ file.rs\n",
+    )
+    .expect("mine");
 
-    let stdout = artifact_message(&deps.join("libmine-aaaa.rmeta"));
+    let stdout = artifact_message(&deps.join("libmine-aaaaaaaaaaaaaaaa.rmeta"));
     let compiled = compiled_sources(&stdout, Utf8Path::new("/nowhere")).expect("read something");
 
     let target = |path: &str| TargetFile {
@@ -4617,7 +4760,7 @@ fn a_compiled_set_disjoint_from_the_survey_withdraws_nothing() {
 /// every mutant in the run as unbuilt and report a perfect score for a run that tested nothing.
 #[test]
 fn dep_info_that_cannot_be_read_yields_no_conclusion() {
-    let stdout = r#"{"reason":"compiler-artifact","filenames":["/nowhere/deps/libmine-aaaa.rmeta"]}"#;
+    let stdout = r#"{"reason":"compiler-artifact","filenames":["/nowhere/deps/libmine-aaaaaaaaaaaaaaaa.rmeta"]}"#;
 
     assert!(compiled_sources(stdout, Utf8Path::new("/nowhere")).is_none());
 }
@@ -4634,9 +4777,9 @@ fn a_dep_info_path_that_cannot_be_read_as_text_is_skipped() {
 
     // A directory happens to share the name a dep-info file would have; reading it as text
     // fails the same way an unreadable file would.
-    fs::create_dir_all(deps.join("mine-aaaa.d").as_std_path()).expect("a directory standing in for the dep file");
+    fs::create_dir_all(deps.join("mine-aaaaaaaaaaaaaaaa.d").as_std_path()).expect("a directory standing in for the dep file");
 
-    let stdout = artifact_message(&deps.join("libmine-aaaa.rmeta"));
+    let stdout = artifact_message(&deps.join("libmine-aaaaaaaaaaaaaaaa.rmeta"));
     let compiled = compiled_sources(&stdout, Utf8Path::new("/nowhere"));
 
     // Nothing could be read at all, so the honest answer is "no opinion", not an empty set.
@@ -4652,9 +4795,9 @@ fn a_dep_info_line_without_a_rule_separator_is_ignored() {
     let deps = Utf8PathBuf::from_path_buf(dir.path().join("deps")).expect("utf8");
 
     fs::create_dir_all(deps.as_std_path()).expect("deps");
-    fs::write(deps.join("mine-aaaa.d").as_std_path(), "just some text with no colon\n").expect("mine");
+    fs::write(deps.join("mine-aaaaaaaaaaaaaaaa.d").as_std_path(), "just some text with no colon\n").expect("mine");
 
-    let stdout = artifact_message(&deps.join("libmine-aaaa.rmeta"));
+    let stdout = artifact_message(&deps.join("libmine-aaaaaaaaaaaaaaaa.rmeta"));
     let compiled = compiled_sources(&stdout, Utf8Path::new("/nowhere")).expect("the file was read");
 
     assert!(compiled.is_empty(), "{compiled:?}");
@@ -4668,11 +4811,14 @@ fn a_line_that_is_not_json_does_not_stop_dep_file_discovery() {
     let deps = Utf8PathBuf::from_path_buf(dir.path().join("deps")).expect("utf8");
 
     fs::create_dir_all(deps.as_std_path()).expect("deps");
-    fs::write(deps.join("mine-aaaa.d").as_std_path(), "x: src/kept.rs\n").expect("mine");
+    fs::write(deps.join("mine-aaaaaaaaaaaaaaaa.d").as_std_path(), "x: src/kept.rs\n").expect("mine");
 
-    let stdout = format!("not json at all\n{}\n", artifact_message(&deps.join("libmine-aaaa.rmeta")));
+    let stdout = format!(
+        "not json at all\n{}\n",
+        artifact_message(&deps.join("libmine-aaaaaaaaaaaaaaaa.rmeta"))
+    );
 
-    assert_eq!(dep_files(&stdout), vec![deps.join("mine-aaaa.d")]);
+    assert_eq!(dep_files(&stdout), vec![deps.join("mine-aaaaaaaaaaaaaaaa.d")]);
 }
 
 /// Only `compiler-artifact` messages name a compiled unit; a message of a different reason —
@@ -4680,7 +4826,7 @@ fn a_line_that_is_not_json_does_not_stop_dep_file_discovery() {
 /// mistaken for one.
 #[test]
 fn messages_with_a_different_reason_are_not_read_as_artifacts() {
-    let stdout = r#"{"reason":"build-script-executed","filenames":["/gamma/deps/libmine-aaaa.rmeta"]}"#;
+    let stdout = r#"{"reason":"build-script-executed","filenames":["/gamma/deps/libmine-aaaaaaaaaaaaaaaa.rmeta"]}"#;
 
     assert_eq!(dep_files(stdout).len(), 0);
 }
@@ -4708,7 +4854,7 @@ fn a_completely_empty_filename_is_skipped() {
 /// the whole discovery pass; the rest of the units still have dep-info worth reading.
 #[test]
 fn a_dep_info_directory_that_does_not_exist_is_skipped() {
-    let stdout = r#"{"reason":"compiler-artifact","filenames":["/gamma/definitely/not/a/directory/libmine-aaaa.rmeta"]}"#;
+    let stdout = r#"{"reason":"compiler-artifact","filenames":["/gamma/definitely/not/a/directory/libmine-aaaaaaaaaaaaaaaa.rmeta"]}"#;
 
     assert_eq!(dep_files(stdout).len(), 0);
 }
@@ -4725,15 +4871,15 @@ fn a_directory_entry_with_a_non_utf8_name_is_skipped_without_panicking() {
     let deps = Utf8PathBuf::from_path_buf(dir.path().join("deps")).expect("utf8");
 
     fs::create_dir_all(deps.as_std_path()).expect("deps");
-    fs::write(deps.join("mine-aaaa.d").as_std_path(), "x: src/kept.rs\n").expect("mine");
+    fs::write(deps.join("mine-aaaaaaaaaaaaaaaa.d").as_std_path(), "x: src/kept.rs\n").expect("mine");
 
     let invalid_name = std::ffi::OsStr::from_bytes(b"mine-\xFF\xFE.d");
     fs::write(dir.path().join("deps").join(invalid_name), "x: src/ignored.rs\n").expect("non-utf8 entry");
 
-    let stdout = artifact_message(&deps.join("libmine-aaaa.rmeta"));
+    let stdout = artifact_message(&deps.join("libmine-aaaaaaaaaaaaaaaa.rmeta"));
     let found = dep_files(&stdout);
 
-    assert_eq!(found, vec![deps.join("mine-aaaa.d")], "{found:?}");
+    assert_eq!(found, vec![deps.join("mine-aaaaaaaaaaaaaaaa.d")], "{found:?}");
 }
 
 /// Dep-info spells its paths absolutely for some units and relatively for others, and mutants
@@ -4744,9 +4890,13 @@ fn absolute_and_relative_dependency_paths_both_land_relative_to_the_tree() {
     let deps = Utf8PathBuf::from_path_buf(dir.path().join("deps")).expect("utf8");
 
     fs::create_dir_all(deps.as_std_path()).expect("deps");
-    fs::write(deps.join("mine-aaaa.d").as_std_path(), "x: /tree/src/one.rs src/two.rs\n").expect("mine");
+    fs::write(
+        deps.join("mine-aaaaaaaaaaaaaaaa.d").as_std_path(),
+        "x: /tree/src/one.rs src/two.rs\n",
+    )
+    .expect("mine");
 
-    let stdout = artifact_message(&deps.join("mine-aaaa.rlib"));
+    let stdout = artifact_message(&deps.join("mine-aaaaaaaaaaaaaaaa.rlib"));
     let compiled = compiled_sources(&stdout, Utf8Path::new("/tree")).expect("read something");
 
     assert!(compiled.contains(Utf8Path::new("src/one.rs")), "{compiled:?}");

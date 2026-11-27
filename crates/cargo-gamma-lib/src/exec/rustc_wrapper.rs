@@ -12,6 +12,7 @@ use serde::{Deserialize, Serialize};
 
 pub(crate) const CAPTURE_DIR_VAR: &str = "CARGO_GAMMA_RUSTC_CAPTURE_DIR";
 pub(crate) const ORIGINAL_WRAPPER_VAR: &str = "CARGO_GAMMA_ORIGINAL_RUSTC_WRAPPER";
+pub(crate) const CAP_LINTS_VAR: &str = "CARGO_GAMMA_CAP_LINTS";
 
 static NEXT_CAPTURE: AtomicU64 = AtomicU64::new(0);
 
@@ -78,7 +79,10 @@ fn run_if_requested_with<I: IntoIterator<Item = OsString>>(
     run: impl FnOnce(&mut Command) -> std::io::Result<Option<i32>>,
     publish: impl FnOnce(&camino::Utf8Path, &[u8]) -> std::io::Result<()>,
 ) -> Option<ExitCode> {
-    let directory = environment(CAPTURE_DIR_VAR).filter(|directory| !directory.is_empty())?;
+    let directory = environment(CAPTURE_DIR_VAR).filter(|directory| !directory.is_empty());
+    if directory.is_none() && environment(CAP_LINTS_VAR).is_none() {
+        return None;
+    }
     let mut args = args.into_iter();
     let _self = args.next();
     let forwarded: Vec<OsString> = args.collect();
@@ -87,6 +91,8 @@ fn run_if_requested_with<I: IntoIterator<Item = OsString>>(
     let mut command = if let Some(wrapper) = environment(ORIGINAL_WRAPPER_VAR).filter(|path| !path.is_empty()) {
         let mut command = Command::new(wrapper);
         let _ = command.args(&forwarded);
+        // Consume chaining without removing the marker that disables replay for user wrappers.
+        let _ = command.env(ORIGINAL_WRAPPER_VAR, "");
         command
     } else {
         let mut command = Command::new(compiler);
@@ -94,11 +100,18 @@ fn run_if_requested_with<I: IntoIterator<Item = OsString>>(
         command
     };
 
+    // Cargo has already resolved target, ancestor, and Cargo-home rustflags here. Appending last
+    // makes the cap independent of which source won, without replacing any user flags.
+    if parse_invocation(&forwarded[1..]).is_some() {
+        let _command = command.arg("--cap-lints=allow");
+    }
+
     let Ok(code) = run(&mut command) else {
         return Some(ExitCode::FAILURE);
     };
 
     if code == Some(0)
+        && let Some(directory) = directory
         && let Some(mut invocation) = parse_invocation(&forwarded[1..])
     {
         invocation.opaque_extern |= binary_environment()
@@ -122,14 +135,25 @@ fn run_if_requested_with<I: IntoIterator<Item = OsString>>(
 /// Capture data is an optimization: failure to clear or create the directory must not stop Cargo.
 #[must_use]
 pub(crate) fn reset_capture_directory(directory: &camino::Utf8Path) -> bool {
-    match fs::remove_dir_all(directory.as_std_path()) {
+    reset_capture_directory_with(
+        directory,
+        |path| fs::remove_dir_all(path.as_std_path()),
+        |path| fs::create_dir_all(path.as_std_path()),
+    )
+}
+
+fn reset_capture_directory_with(
+    directory: &camino::Utf8Path,
+    remove: impl FnOnce(&camino::Utf8Path) -> std::io::Result<()>,
+    create: impl FnOnce(&camino::Utf8Path) -> std::io::Result<()>,
+) -> bool {
+    match remove(directory) {
         Ok(()) => {}
-        // #[gamma::skip(match_guard.always_true, reason = "This branch handles native capture-directory removal failures; deterministic permission refusals need the deferred directory-operation backend.", tag = "native-boundary")]
         Err(cause) if cause.kind() == std::io::ErrorKind::NotFound => {}
         Err(_cause) => return false,
     }
 
-    fs::create_dir_all(directory.as_std_path()).is_ok()
+    create(directory).is_ok()
 }
 
 /// Publishes a complete capture without replacing an entry from another wrapper process.
@@ -140,6 +164,44 @@ pub(crate) fn reset_capture_directory(directory: &camino::Utf8Path) -> bool {
 /// leave only the temporary entry, which the next build removes with [`reset_capture_directory`].
 fn publish_capture(directory: &camino::Utf8Path, bytes: &[u8]) -> std::io::Result<()> {
     publish_capture_with(directory, bytes, next_capture_stem)
+}
+
+/// Replaces one cache entry only after the complete replacement has been flushed.
+pub(super) fn publish_atomic(path: &camino::Utf8Path, bytes: &[u8]) -> std::io::Result<()> {
+    publish_atomic_with(path, bytes, |from, to| fs::rename(from, to))
+}
+
+fn publish_atomic_with(
+    path: &camino::Utf8Path,
+    bytes: &[u8],
+    replace: impl FnOnce(&std::path::Path, &std::path::Path) -> std::io::Result<()>,
+) -> std::io::Result<()> {
+    publish_atomic_with_stem(path, bytes, replace, next_capture_stem)
+}
+
+fn publish_atomic_with_stem(
+    path: &camino::Utf8Path,
+    bytes: &[u8],
+    replace: impl FnOnce(&std::path::Path, &std::path::Path) -> std::io::Result<()>,
+    mut next_stem: impl FnMut() -> String,
+) -> std::io::Result<()> {
+    let directory =
+        // #[gamma::skip(try.propagate_to_unwrap, literal.str_to_empty, literal.str_to_xyzzy, tag = "equivalent", reason = "Every production destination joins a record, output-index or runtime filename to its directory, so the parent exists and this error text is unreachable.")]
+        path.parent().ok_or_else(|| std::io::Error::other("cache entry has no parent"))?;
+    fs::create_dir_all(directory)?;
+    let (temporary, mut file) = loop {
+        let temporary = directory.join(format!("{}.tmp", next_stem()));
+        match OpenOptions::new().create_new(true).write(true).open(&temporary) {
+            Ok(file) => break (temporary, file),
+            Err(cause) if cause.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(cause) => return Err(cause),
+        }
+    };
+    let result = file.write_all(bytes).and_then(|()| file.sync_data());
+    drop(file);
+    let result = result.and_then(|()| replace(temporary.as_std_path(), path.as_std_path()));
+    let _removed = fs::remove_file(temporary);
+    result
 }
 
 // Exclusive creation, flushing, hard-link publication, and cleanup are filesystem race/failure
@@ -204,64 +266,58 @@ pub(crate) fn parse_invocation(args: &[OsString]) -> Option<RustcInvocation> {
     let mut extra_filename = String::new();
     let mut externs = Vec::new();
     let mut opaque_extern = false;
-    let mut index = 0;
+    let mut arguments = args.iter();
 
-    while index < args.len() {
-        let argument = args[index].to_string_lossy();
-        let separate = |name: &str| argument == name && index + 1 < args.len();
+    while let Some(value) = arguments.next() {
+        let argument = value.to_string_lossy();
+        let has_value = !arguments.as_slice().is_empty();
+        let separate = |name: &str|
+            // #[gamma::skip(logical.and_remove_right, tag = "supported-input", reason = "Successful rustc invocations supply values for these separate-value flags. Dangling flags are rejected by rustc and cannot produce a compiler capture.")]
+            argument == name && has_value;
 
         if separate("--crate-name") {
-            crate_name = Some(args[index + 1].to_string_lossy().into_owned());
-            // #[gamma::skip(all, reason = "not consuming the split option and its value retries the same argument forever and is observed only as a timeout")]
-            index += 2;
+            crate_name = Some(
+                // #[gamma::skip(try.propagate_to_unwrap, tag = "equivalent", reason = "separate verifies a remaining value and the iterator is unchanged before this next call.")]
+                arguments.next()?.to_string_lossy().into_owned(),
+            );
         } else if let Some(value) = argument.strip_prefix("--crate-name=") {
             crate_name = Some(value.to_owned());
-            // #[gamma::skip(all, reason = "not consuming the joined option retries the same argument forever and is observed only as a timeout")]
-            index += 1;
         } else if separate("--crate-type") {
-            crate_types.extend(args[index + 1].to_string_lossy().split(',').map(str::to_owned));
-            // #[gamma::skip(all, reason = "moving backward or not consuming the split option makes the parser intrinsically nonterminating and is observed only as a timeout")]
-            index += 2;
+            crate_types.extend(
+                // #[gamma::skip(try.propagate_to_unwrap, tag = "equivalent", reason = "separate verifies a remaining value and the iterator is unchanged before this next call.")]
+                arguments.next()?.to_string_lossy().split(',').map(str::to_owned),
+            );
         } else if let Some(value) = argument.strip_prefix("--crate-type=") {
             crate_types.extend(value.split(',').map(str::to_owned));
-            // #[gamma::skip(all, reason = "moving backward or not consuming the joined option makes the parser intrinsically nonterminating and is observed only as a timeout")]
-            index += 1;
         } else if argument == "--test" {
             test = true;
-            // #[gamma::skip(assign.add_to_sub, stmt.delete_assign, literal.int_decrement, tag = "timeout", reason = "the test-option scan must consume its argument to make progress")]
-            index += 1;
         } else if separate("--out-dir") {
-            out_dir = utf8(&args[index + 1]);
-            // #[gamma::skip(all, reason = "moving backward or not consuming the split option makes the parser intrinsically nonterminating and is observed only as a timeout")]
-            index += 2;
+            out_dir = utf8(
+                // #[gamma::skip(try.propagate_to_unwrap, tag = "equivalent", reason = "separate verifies a remaining value and the iterator is unchanged before this next call.")]
+                arguments.next()?,
+            );
         } else if let Some(value) = argument.strip_prefix("--out-dir=") {
             out_dir = Some(Utf8PathBuf::from(value));
-            // #[gamma::skip(all, reason = "moving backward or not consuming the joined option makes the parser intrinsically nonterminating and is observed only as a timeout")]
-            index += 1;
         } else if separate("-C") {
-            if let Some(value) = args[index + 1].to_str().and_then(|value| value.strip_prefix("extra-filename=")) {
+            if let Some(value) =
+                // #[gamma::skip(try.propagate_to_unwrap, tag = "equivalent", reason = "separate verifies a remaining value and the iterator is unchanged before this next call.")]
+                arguments.next()?.to_str().and_then(|value| value.strip_prefix("extra-filename="))
+            {
                 value.clone_into(&mut extra_filename);
             }
-            // #[gamma::skip(all, reason = "moving backward or not consuming the split option makes the parser intrinsically nonterminating and is observed only as a timeout")]
-            index += 2;
         } else if let Some(value) = argument.strip_prefix("-Cextra-filename=") {
             value.clone_into(&mut extra_filename);
-            // #[gamma::skip(all, reason = "not consuming the joined option retries the same argument forever and is observed only as a timeout")]
-            index += 1;
         } else if separate("--extern") {
-            parse_extern(&args[index + 1], &mut externs, &mut opaque_extern);
-            // #[gamma::skip(all, reason = "moving backward or not consuming the split option makes the parser intrinsically nonterminating and is observed only as a timeout")]
-            index += 2;
+            parse_extern(
+                // #[gamma::skip(try.propagate_to_unwrap, tag = "equivalent", reason = "separate verifies a remaining value and the iterator is unchanged before this next call.")]
+                arguments.next()?,
+                &mut externs,
+                &mut opaque_extern,
+            );
         } else if let Some(value) = argument.strip_prefix("--extern=") {
             parse_extern(OsStr::new(value), &mut externs, &mut opaque_extern);
-            // #[gamma::skip(all, reason = "moving backward or not consuming the joined option makes the parser intrinsically nonterminating and is observed only as a timeout")]
-            index += 1;
-        } else {
-            if !argument.starts_with('-') && argument.ends_with(".rs") && source.is_none() {
-                source = utf8(&args[index]);
-            }
-            // #[gamma::skip(all, reason = "not advancing past an unrecognized argument retries it forever and is observed only as a timeout")]
-            index += 1;
+        } else if !argument.starts_with('-') && argument.ends_with(".rs") && source.is_none() {
+            source = utf8(value);
         }
     }
 
@@ -294,12 +350,16 @@ fn utf8(value: &OsStr) -> Option<Utf8PathBuf> {
     value.to_str().map(Utf8PathBuf::from)
 }
 
-// #[gamma::skip(all, reason = "the mutation affects internal orchestration state with no safely deterministic observation at this layer")]
 pub(crate) fn wrapper_path() -> Option<Utf8PathBuf> {
-    let path = Utf8PathBuf::from_path_buf(std::env::current_exe().ok()?).ok()?;
-    let stem = path.file_stem()?;
+    wrapper_path_with(std::env::current_exe)
+}
 
-    // #[gamma::skip(all, reason = "this literal belongs to a Cargo process protocol or diagnostic boundary that cannot be isolated deterministically without replacing process-global integration state")]
+fn wrapper_path_with(current_exe: impl FnOnce() -> std::io::Result<std::path::PathBuf>) -> Option<Utf8PathBuf> {
+    let path = Utf8PathBuf::from_path_buf(current_exe().ok()?).ok()?;
+    let stem =
+        // #[gamma::skip(try.propagate_to_unwrap, tag = "native-boundary", reason = "A successful native current_exe lookup identifies an executable filename, not a directory root, so its file stem exists.")]
+        path.file_stem()?;
+
     (stem == "cargo-gamma").then_some(path)
 }
 
@@ -313,6 +373,170 @@ mod tests {
     use camino::Utf8Path;
 
     use super::*;
+
+    #[test]
+    fn the_final_lint_cap_wins_over_cargo_resolved_target_flags_even_without_captures() {
+        let result = run_if_requested_with(
+            args(&[
+                "gamma",
+                "rustc",
+                "--crate-name=host",
+                "src/lib.rs",
+                "--out-dir=target",
+                "--cfg=parent_target",
+                "--cap-lints=deny",
+            ]),
+            |name| match name {
+                CAPTURE_DIR_VAR | ORIGINAL_WRAPPER_VAR => None,
+                CAP_LINTS_VAR => Some("1".into()),
+                _ => panic!("unexpected lookup"),
+            },
+            || -> Vec<OsString> { panic!("lint-only wrapping must not capture dependencies") },
+            |command| {
+                let forwarded = command.get_args().collect::<Vec<_>>();
+                assert!(forwarded.contains(&OsStr::new("--cfg=parent_target")), "user flags are preserved");
+                assert_eq!(forwarded.last().copied(), Some(OsStr::new("--cap-lints=allow")));
+                Ok(Some(0))
+            },
+            |_, _| panic!("lint-only wrapping must not publish into an unavailable capture generation"),
+        );
+        assert_eq!(result, Some(ExitCode::SUCCESS));
+    }
+
+    #[test]
+    fn configured_outer_and_workspace_wrappers_keep_cargos_nesting_and_the_final_cap() {
+        let invocation = [
+            "gamma",
+            "workspace-wrapper",
+            "rustc",
+            "--crate-name=subject",
+            "src/lib.rs",
+            "--out-dir=target",
+            "--cfg=kept",
+            "--cap-lints=deny",
+        ];
+        let result = run_if_requested_with(
+            args(&invocation),
+            |name| match name {
+                CAPTURE_DIR_VAR => None,
+                CAP_LINTS_VAR => Some("1".into()),
+                ORIGINAL_WRAPPER_VAR => Some("resolved-outer-wrapper".into()),
+                _ => panic!("unexpected lookup"),
+            },
+            || -> Vec<OsString> { panic!("lint-only mode has no captures") },
+            |command| {
+                assert_eq!(command.get_program(), OsStr::new("resolved-outer-wrapper"));
+                assert!(
+                    command
+                        .get_envs()
+                        .any(|(name, value)| name == ORIGINAL_WRAPPER_VAR && value == Some(OsStr::new(""))),
+                    "the selected wrapper must not inherit a request to invoke itself again"
+                );
+                let mut expected = args(&invocation[1..]);
+                expected.push("--cap-lints=allow".into());
+                assert_eq!(command.get_args().map(OsString::from).collect::<Vec<_>>(), expected);
+                Ok(Some(0))
+            },
+            |_, _| panic!("lint-only mode has no captures"),
+        );
+        assert_eq!(result, Some(ExitCode::SUCCESS));
+    }
+
+    #[test]
+    fn a_bare_self_wrapper_runs_the_compiler_once_instead_of_recursing() {
+        let invocation = ["gamma", "rustc", "--crate-name=subject", "src/lib.rs", "--out-dir=target"];
+        let mut compiler_calls = 0;
+        let result = run_if_requested_with(
+            args(&invocation),
+            |name| match name {
+                CAP_LINTS_VAR => Some("1".into()),
+                ORIGINAL_WRAPPER_VAR => Some("gamma".into()),
+                _ => None,
+            },
+            Vec::<OsString>::new,
+            |outer| {
+                assert_eq!(outer.get_program(), OsStr::new("gamma"));
+                let inner = run_if_requested_with(
+                    std::iter::once(outer.get_program().to_owned()).chain(outer.get_args().map(OsStr::to_owned)),
+                    |name| {
+                        outer.get_envs().find(|(key, _)| *key == name).map_or_else(
+                            || match name {
+                                CAP_LINTS_VAR => Some("1".into()),
+                                ORIGINAL_WRAPPER_VAR => Some("gamma".into()),
+                                _ => None,
+                            },
+                            |(_, value)| value.map(OsStr::to_owned),
+                        )
+                    },
+                    Vec::<OsString>::new,
+                    |compiler| {
+                        compiler_calls += 1;
+                        assert_eq!(compiler.get_program(), OsStr::new("rustc"));
+                        assert_eq!(compiler.get_args().last(), Some(OsStr::new("--cap-lints=allow")));
+                        Ok(Some(0))
+                    },
+                    |_, _| panic!("lint-only mode must not publish captures"),
+                );
+                assert_eq!(inner, Some(ExitCode::SUCCESS));
+                Ok(Some(0))
+            },
+            |_, _| panic!("lint-only mode must not publish captures"),
+        );
+        assert_eq!(result, Some(ExitCode::SUCCESS));
+        assert_eq!(compiler_calls, 1);
+    }
+
+    #[test]
+    fn capture_reset_declines_remove_and_create_failures_but_accepts_absent_generations() {
+        let directory = Utf8Path::new("captures");
+        assert!(!reset_capture_directory_with(
+            directory,
+            |_| Err(std::io::Error::from(std::io::ErrorKind::PermissionDenied)),
+            |_| panic!("a failed cleanup cannot create a usable generation")
+        ));
+        for absent in [false, true] {
+            for created in [false, true] {
+                assert_eq!(
+                    reset_capture_directory_with(
+                        directory,
+                        |_| if absent {
+                            Err(std::io::Error::from(std::io::ErrorKind::NotFound))
+                        } else {
+                            Ok(())
+                        },
+                        |path| {
+                            assert_eq!(path, directory);
+                            if created {
+                                Ok(())
+                            } else {
+                                Err(std::io::Error::from(std::io::ErrorKind::PermissionDenied))
+                            }
+                        }
+                    ),
+                    created
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn atomic_replacement_keeps_the_old_record_until_complete_publication_and_cleans_failed_staging() {
+        let directory = tempfile::tempdir_in(".").unwrap();
+        let path = Utf8Path::from_path(directory.path()).unwrap().join("record.json");
+        fs::write(&path, b"old complete record").unwrap();
+        let failure = publish_atomic_with(&path, b"new complete record", |temporary, published| {
+            assert_eq!(fs::read(temporary).unwrap(), b"new complete record");
+            assert_eq!(fs::read(published).unwrap(), b"old complete record");
+            Err(std::io::Error::other("publication refused"))
+        })
+        .unwrap_err();
+        assert_eq!(failure.to_string(), "publication refused");
+        assert_eq!(fs::read(&path).unwrap(), b"old complete record");
+        assert_eq!(fs::read_dir(directory.path()).unwrap().count(), 1);
+        publish_atomic(&path, b"new complete record").unwrap();
+        assert_eq!(fs::read(&path).unwrap(), b"new complete record");
+        assert_eq!(fs::read_dir(directory.path()).unwrap().count(), 1);
+    }
 
     #[test]
     fn recovered_native_wrapper_returns_the_exact_nonzero_compiler_code_and_forwards_its_command_without_spawning() {
@@ -350,6 +574,165 @@ mod tests {
 
     fn args(values: &[&str]) -> Vec<OsString> {
         values.iter().map(OsString::from).collect()
+    }
+
+    #[test]
+    fn nov21_atomic_cache_publication_retries_an_existing_temporary_but_not_a_disappeared_directory() {
+        let directory = tempfile::tempdir_in(".").unwrap();
+        let root = Utf8PathBuf::from_path_buf(directory.path().to_owned()).unwrap();
+        let destination = root.join("record.json");
+        fs::write(root.join("occupied.tmp"), b"previous writer").unwrap();
+        let mut stems = ["occupied".to_owned(), "fresh".to_owned()].into_iter();
+        publish_atomic_with_stem(
+            &destination,
+            b"complete replacement",
+            |from, to| {
+                assert_eq!(fs::read(from).unwrap(), b"complete replacement");
+                fs::rename(from, to)
+            },
+            || stems.next().expect("one collision must consume exactly two proposed names"),
+        )
+        .unwrap();
+        assert_eq!(fs::read(&destination).unwrap(), b"complete replacement");
+        assert_eq!(fs::read(root.join("occupied.tmp")).unwrap(), b"previous writer");
+        assert!(!root.join("fresh.tmp").exists());
+
+        let vanished = root.join("vanished");
+        let mut attempts = 0;
+        let failure = publish_atomic_with_stem(
+            &vanished.join("record.json"),
+            b"must not publish",
+            |_, _| panic!("failed exclusive creation must not publish"),
+            || {
+                attempts += 1;
+                assert_eq!(attempts, 1, "a noncollision error must not be retried");
+                fs::remove_dir(&vanished).unwrap();
+                "fresh".into()
+            },
+        )
+        .unwrap_err();
+        assert_eq!(failure.kind(), std::io::ErrorKind::NotFound);
+        assert!(!vanished.exists());
+    }
+
+    #[test]
+    fn nov21_atomic_cache_publication_propagates_an_uncreatable_parent() {
+        let directory = tempfile::tempdir_in(".").unwrap();
+        let root = Utf8PathBuf::from_path_buf(directory.path().to_owned()).unwrap();
+        let blocker = root.join("not-a-directory");
+        fs::write(&blocker, b"preserved").unwrap();
+        assert!(
+            publish_atomic_with(&blocker.join("record.json"), b"replacement", |_, _| panic!(
+                "an uncreatable parent must not reach replacement"
+            ),)
+            .is_err()
+        );
+        assert_eq!(fs::read(blocker).unwrap(), b"preserved");
+    }
+
+    #[test]
+    fn nov21_split_out_directory_and_codegen_values_are_consumed_before_the_source() {
+        let parsed = parse_invocation(&args(&[
+            "--crate-name=subject",
+            "--out-dir",
+            "output.rs",
+            "-C",
+            "extra-filename=-suffix.rs",
+            "--crate-type",
+            "lib,rlib",
+            "--extern",
+            "dep=target/libdep.rlib",
+            "--cfg=kept",
+            "src/subject.rs",
+        ]))
+        .unwrap();
+        assert_eq!(parsed.source, Utf8Path::new("src/subject.rs"));
+        assert_eq!(parsed.out_dir, Utf8Path::new("output.rs"));
+        assert_eq!(parsed.extra_filename, "-suffix.rs");
+        assert_eq!(parsed.crate_types, ["lib", "rlib"]);
+        assert_eq!(parsed.externs, [Utf8PathBuf::from("target/libdep.rlib")]);
+    }
+
+    #[test]
+    fn nov21_each_split_or_joined_option_leaves_the_following_compiler_option_visible() {
+        for option in [
+            vec!["--crate-name", "subject"],
+            vec!["--crate-name=subject"],
+            vec!["--crate-type", "lib,rlib"],
+            vec!["--crate-type=lib,rlib"],
+            vec!["--out-dir", "output"],
+            vec!["--out-dir=output"],
+            vec!["-C", "extra-filename=-unit.rs"],
+            vec!["-Cextra-filename=-unit"],
+            vec!["--extern", "dep=target/libdep.rlib"],
+            vec!["--extern=dep=target/libdep.rlib"],
+            vec!["--cfg=enabled"],
+        ] {
+            let mut invocation = vec!["--cfg=leading"; 3];
+            invocation.extend(option);
+            invocation.extend(["--out-dir=output", "--crate-name=subject", "src/subject.rs"]);
+            let parsed = parse_invocation(&args(&invocation)).unwrap();
+            assert_eq!(parsed.source, Utf8Path::new("src/subject.rs"));
+            assert_eq!(parsed.crate_name, "subject");
+            assert_eq!(parsed.out_dir, Utf8Path::new("output"));
+        }
+    }
+
+    #[test]
+    fn nov21_split_and_joined_scans_at_index_zero_cannot_move_backwards() {
+        for option in [
+            vec!["--crate-type", "lib,rlib"],
+            vec!["--crate-type=lib,rlib"],
+            vec!["--out-dir", "output"],
+            vec!["--out-dir=output"],
+            vec!["-C", "extra-filename=-unit"],
+            vec!["-Cextra-filename=-unit"],
+            vec!["--extern", "dep=target/libdep.rlib"],
+            vec!["--extern=dep=target/libdep.rlib"],
+        ] {
+            let mut invocation = option;
+            invocation.extend(["--crate-name=subject", "--out-dir=output", "src/subject.rs"]);
+            let parsed = parse_invocation(&args(&invocation)).unwrap();
+            assert_eq!(parsed.crate_name, "subject");
+            assert_eq!(parsed.out_dir, Utf8Path::new("output"));
+            assert_eq!(parsed.source, Utf8Path::new("src/subject.rs"));
+        }
+    }
+
+    #[test]
+    fn nov21_parser_exhausts_long_codegen_lists_without_rescanning_value_paths() {
+        let mut invocation = args(&["--crate-name=subject", "--crate-type=lib", "--out-dir=output"]);
+        for _ in 0..64 {
+            invocation.extend(args(&["-C", "metadata=not-the-source.rs"]));
+        }
+        invocation.extend(args(&["--cfg=enabled", "src/subject.rs"]));
+        let parsed = parse_invocation(&invocation).unwrap();
+        assert_eq!(parsed.source, Utf8Path::new("src/subject.rs"));
+        assert_eq!(parsed.crate_types, ["lib"]);
+        assert_eq!(parsed.extra_filename, "");
+    }
+
+    #[test]
+    fn nov21_a_custom_compiler_path_is_not_a_source_when_deciding_lint_capping() {
+        let invocation = [
+            "gamma",
+            "custom-compiler.rs",
+            "--crate-name=subject",
+            "--out-dir=output",
+            "src/subject.custom",
+        ];
+        let result = run_if_requested_with(
+            args(&invocation),
+            |name| (name == CAP_LINTS_VAR).then(|| "1".into()),
+            || -> Vec<OsString> { panic!("lint-only mode must not enumerate capture inputs") },
+            |command| {
+                assert_eq!(command.get_program(), OsStr::new("custom-compiler.rs"));
+                assert_eq!(command.get_args().map(OsString::from).collect::<Vec<_>>(), args(&invocation[2..]));
+                Ok(Some(0))
+            },
+            |_, _| panic!("a noncapturable custom source has no publication"),
+        );
+        assert_eq!(result, Some(ExitCode::SUCCESS));
     }
 
     #[test]
@@ -487,6 +870,26 @@ mod tests {
     }
 
     #[test]
+    fn nov21_unavailable_or_non_unicode_executable_paths_decline_wrapper_interposition() {
+        assert_eq!(
+            wrapper_path_with(|| Err(std::io::Error::from(std::io::ErrorKind::PermissionDenied))),
+            None,
+        );
+        #[cfg(windows)]
+        let name = {
+            use std::os::windows::ffi::OsStringExt as _;
+            OsString::from_wide(&[0xd800])
+        };
+        #[cfg(unix)]
+        let name = {
+            use std::os::unix::ffi::OsStringExt as _;
+            OsString::from_vec(vec![0xff])
+        };
+        let path = std::env::current_dir().unwrap().join(name);
+        assert_eq!(wrapper_path_with(|| Ok(path)), None);
+    }
+
+    #[test]
     fn ordinary_invocations_do_not_enter_wrapper_mode() {
         assert_wrapper_not_requested(None, &["cargo-gamma", "rustc"]);
     }
@@ -508,15 +911,15 @@ mod tests {
             args(invocation),
             |name| {
                 reads += 1;
-                assert_eq!(name, CAPTURE_DIR_VAR);
-                capture.map(OsString::from)
+                assert!(matches!(name, CAPTURE_DIR_VAR | CAP_LINTS_VAR));
+                (name == CAPTURE_DIR_VAR).then(|| capture.map(OsString::from)).flatten()
             },
             || -> Vec<OsString> { panic!("no compiler invocation needs binary dependency discovery") },
             |_| panic!("wrapper mode was not requested"),
             |_, _| panic!("no compiler ran to publish a capture"),
         );
         assert_eq!(result, None);
-        assert_eq!(reads, 1);
+        assert_eq!(reads, if capture.is_some_and(|value| !value.is_empty()) { 1 } else { 2 });
     }
 
     #[test]
@@ -717,7 +1120,8 @@ mod tests {
                 if preopaque {
                     invocation.push("--extern=opaque".into());
                 }
-                let expected_args = invocation[if original == Some("original-wrapper") { 1 } else { 2 }..].to_vec();
+                let mut expected_args = invocation[if original == Some("original-wrapper") { 1 } else { 2 }..].to_vec();
+                expected_args.push("--cap-lints=allow".into());
                 let mut reads = Vec::new();
                 let ran = Cell::new(false);
                 let mut published = false;
@@ -746,7 +1150,7 @@ mod tests {
                         );
                         assert_eq!(command.get_args().collect::<Vec<_>>(), expected_args);
                         assert_eq!(command.get_current_dir(), None);
-                        assert_eq!(command.get_envs().count(), 0);
+                        assert_eq!(command.get_envs().count(), usize::from(original == Some("original-wrapper")));
                         ran.set(true);
                         Ok(Some(0))
                     },
@@ -834,7 +1238,7 @@ mod tests {
                 assert_eq!(command.get_program(), OsStr::new("rustc"));
                 assert_eq!(
                     command.get_args().collect::<Vec<_>>(),
-                    args(&["--crate-name=wrapped", "src/lib.rs", "--out-dir=target"])
+                    args(&["--crate-name=wrapped", "src/lib.rs", "--out-dir=target", "--cap-lints=allow"])
                 );
                 ran = true;
                 status

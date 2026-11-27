@@ -3,11 +3,13 @@
 
 use std::io::Write;
 
-use chrono::{DateTime, Utc};
+use jiff::Timestamp;
+use jiff::civil::Date;
 use ohno::{IntoAppError, bail};
 use semver::Version;
 use url::Url;
 
+use super::encode_epoch_day;
 use crate::Result;
 
 #[derive(Debug)]
@@ -144,21 +146,13 @@ impl<'a, W: Write> RowWriter<'a, W> {
 }
 
 fn parse_pg_timestamp(s: &str) -> Result<u64> {
-    let dt = DateTime::parse_from_str(s, "%Y-%m-%d %H:%M:%S%.f%#z")
-        .or_else(|_| DateTime::parse_from_rfc3339(s))
-        .into_app_err_with(|| format!("parsing timestamp '{s}'"))?
-        .with_timezone(&Utc);
-    Ok(dt.timestamp().max(0).cast_unsigned())
+    let timestamp = s.parse::<Timestamp>().into_app_err_with(|| format!("parsing timestamp '{s}'"))?;
+    Ok(timestamp.as_second().max(0).cast_unsigned())
 }
 
 fn parse_pg_date(s: &str) -> Result<u64> {
-    Ok(u64::from(
-        chrono::NaiveDate::parse_from_str(s, "%Y-%m-%d")
-            .into_app_err_with(|| format!("parsing date '{s}'"))?
-            .to_epoch_days()
-            .max(0)
-            .cast_unsigned(),
-    ))
+    let date = s.parse::<Date>().into_app_err_with(|| format!("parsing date '{s}'"))?;
+    Ok(encode_epoch_day(date))
 }
 
 #[cfg(test)]
@@ -285,6 +279,17 @@ mod tests {
     }
 
     #[test]
+    fn postgres_fractional_timestamp_is_encoded_as_whole_seconds() {
+        let mut buffer = Vec::new();
+        let mut writer = RowWriter::new(&mut buffer);
+        writer
+            .write_str_as_datetime("2026-07-12 10:11:12.123456+00")
+            .expect("the timestamp is valid PostgreSQL dump input");
+        writer.row_done().expect("writing to a Vec cannot fail");
+        assert_eq!(buffer, encoded(1_783_851_072));
+    }
+
+    #[test]
     fn invalid_date_is_returned_as_an_error() {
         let error = parse_pg_date("not-a-date").expect_err("invalid dates must be rejected");
 
@@ -295,6 +300,18 @@ mod tests {
     fn pre_epoch_dates_and_timestamps_are_clamped_to_zero() {
         assert_eq!(parse_pg_timestamp("1969-12-31T23:59:59Z").unwrap(), 0);
         assert_eq!(parse_pg_date("1969-12-31").unwrap(), 0);
+    }
+
+    #[test]
+    fn far_future_dates_encode_the_exact_unix_day_count() {
+        let mut buffer = Vec::new();
+        let mut writer = RowWriter::new(&mut buffer);
+        writer
+            .write_str_as_date("9999-12-31")
+            .expect("the date is within Jiff's supported range");
+        writer.row_done().expect("writing to a Vec cannot fail");
+
+        assert_eq!(buffer, encoded(2_932_896));
     }
 
     #[test]

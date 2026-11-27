@@ -20,7 +20,6 @@ impl Collector<'_> {
         }
         let owner = types.unshadowed_type_path(receiver)?;
         let syn::Member::Named(member) = &field.member else {
-            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
             return None;
         };
         match (
@@ -47,7 +46,6 @@ impl Collector<'_> {
                 .is_some_and(|path| path.iter().map(String::as_str).eq(["syn", "PathArguments"]))
             || self.calls.has_method_named(replacement)
         {
-            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "false is already the default bool value.")]
             return false;
         }
         let imports = self.current_imports();
@@ -81,7 +79,6 @@ impl Collector<'_> {
             Type::TraitObject(object) => &object.bounds,
             Type::Reference(reference) => return self.callable_output(&reference.elem, scope),
             _ => {
-                // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
                 return None;
             }
         };
@@ -162,7 +159,6 @@ impl Collector<'_> {
                 1
             }
             _ => {
-                // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
                 return None;
             }
         };
@@ -176,7 +172,6 @@ impl Collector<'_> {
             // Without full method resolution, any local by_ref implementation could be the
             // selected method. The file-wide blocker deliberately sacrifices recognition.
             if call.method == "by_ref" && self.calls.has_method_named("by_ref") {
-                // #[gamma::skip(return_value.default, tag = "equivalent", reason = "false is already the default bool value.")]
                 return false;
             }
             return self.is_read_receiver(&call.receiver);
@@ -188,7 +183,6 @@ impl Collector<'_> {
             return true;
         }
         let Some(ty) = self.inferred_expression_type(expression) else {
-            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "false is already the default bool value.")]
             return false;
         };
         self.is_read_type(&ty, self.current_imports())
@@ -234,11 +228,9 @@ impl Collector<'_> {
         // Bounds already identify the reader trait; concrete types additionally need a lexical
         // trait import so similarly named methods are not mistaken for standard reader APIs.
         if !self.read_trait_in_scope() {
-            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "false is already the default bool value.")]
             return false;
         }
         let Some(path) = types.unshadowed_type_path(ty) else {
-            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "false is already the default bool value.")]
             return false;
         };
         matches!(
@@ -262,11 +254,9 @@ impl Collector<'_> {
             _ => {}
         }
         let Expr::Path(callee) = expression else {
-            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "false is already the default bool value.")]
             return false;
         };
         if callee.qself.is_some() {
-            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "false is already the default bool value.")]
             return false;
         }
         let mut path = callee.path.clone();
@@ -278,7 +268,6 @@ impl Collector<'_> {
             path = imported;
         }
         if path.segments.last().is_none_or(|segment| segment.ident != "Some") {
-            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "false is already the default bool value.")]
             return false;
         }
         if
@@ -320,11 +309,9 @@ impl Collector<'_> {
 
     pub(super) fn standard_constructor_type_in_scope(&self, call: &syn::ExprCall, scope: &ScopePath) -> Option<Type> {
         let Expr::Path(callee) = &*call.func else {
-            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
             return None;
         };
         if callee.qself.is_some() {
-            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
             return None;
         }
         let constructor = Type::Path(syn::TypePath {
@@ -349,7 +336,6 @@ impl Collector<'_> {
         // #[gamma::skip(literal.int_decrement, literal.int_to_zero, reason = "A source-parsed callee path is nonempty. Omitting the <2 guard only admits singleton paths not already handled by the Result constructor special case. Popping their sole segment leaves an empty type path; unshadowed_type_path calls resolved_type_path and then first()?, which returns None. Thus the function still returns None before any factory match.", tag = "equivalent")]
         2
         {
-            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
             return None;
         }
         let (ty, method, resolved) = self.constructor_target(call, scope)?;
@@ -413,13 +399,11 @@ impl Collector<'_> {
 
     fn constructor_target(&self, call: &syn::ExprCall, scope: &ScopePath) -> Option<(Type, String, Vec<String>)> {
         let Expr::Path(callee) = &*call.func else {
-            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
             return None;
         };
         if
         // #[gamma::skip(cond.always_false, reason = "Factory inference rejects qself before calling this helper. Its other consumer only recognizes verified concrete standard payload-constructor owners: a well-typed qualified trait path cannot name those structs, while qualified inherent paths leave no owner segments. Removing this duplicate guard changes neither supported factory inference nor payload dependencies.", tag = "equivalent")]
         callee.qself.is_some() {
-            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
             return None;
         }
         let mut path = callee.path.clone();

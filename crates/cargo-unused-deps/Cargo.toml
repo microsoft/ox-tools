@@ -4,7 +4,7 @@
 [package]
 name = "cargo-unused-deps"
 description = "A Cargo subcommand that finds unused and misplaced dependencies"
-version = "0.2.0"
+version = "0.3.0"
 readme = "README.md"
 keywords = ["oxidizer", "cargo", "subcommand", "dependencies", "ci"]
 categories = ["command-line-utilities", "development-tools::cargo-plugins"]
@@ -33,7 +33,7 @@ clap = { workspace = true, features = ["std", "derive", "color", "help", "error-
 ohno = { workspace = true, features = ["app-err"] }
 serde_json = { workspace = true, features = ["std"] }
 tempfile = { workspace = true }
-toml_edit = { workspace = true }
+toml_edit = { workspace = true, features = ["parse", "display"] }
 
 # >>> anvil-managed: anvil-lints
 [lints]

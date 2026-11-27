@@ -10,22 +10,34 @@ The spell checker dictionary is in the `.spelling` file, one word per line in ar
 
 Do not manually edit `CHANGELOG.md` files. Changelogs are automatically updated on release.
 
+## Tool Versioning
+
+When creating a PR that changes a tool's externally observable behavior,
+suggest an appropriate version bump for each affected tool if the PR does not
+already include one. Call out whether the new behavior will remain unpublished
+until a separate release. Do not silently expand the PR into a release unless
+the user requests it or a repository rule requires it.
+
+Use `.\scripts\release-crate.ps1 <crate> -Version <new-version>` for requested
+version bumps so the crate version, generated changelog, README, and
+`Cargo.lock` stay synchronized.
+
 ## cargo-anvil Versioning
 
 When a PR changes cargo-anvil's catalog (including template-only updates),
 include an appropriate `cargo-anvil` crate version bump in the same PR. Use
 `.\scripts\release-crate.ps1 cargo-anvil -Version <new-version>` to update
 the version and generate the changelog, then regenerate the Anvil artifacts,
-snapshots, and `.anvil.lock` from the updated sources.
+snapshots, and `.anvil/manifest.toml` from the updated sources.
 
 A changed `catalog_checksum` with an unchanged `tool_version` in
-`.anvil.lock`, compared with the PR base, is likely a bug: a version bump
-may be missing. Keep the crate version, `Cargo.lock`, and generated lock
-metadata synchronized; do not hand-edit `.anvil.lock` to fix this.
+`.anvil/manifest.toml`, compared with the PR base, is likely a bug: a version bump
+may be missing. Keep the crate version, `Cargo.lock`, and generated manifest
+metadata synchronized; do not hand-edit `.anvil/manifest.toml` to fix this.
 
 Dependabot intentionally continues updating generated GitHub Actions in this
 source repository. Apply those pin changes to cargo-anvil's source templates,
-then bump the crate version and regenerate the workflows and lock metadata;
+then bump the crate version and regenerate the workflows and manifest metadata;
 do not merge a generated-file-only update.
 
 ## Design Docs Are Part of the Source
@@ -49,11 +61,14 @@ when substantially changed — not in a single sweep.
   `docs/design/` landing page on GitHub and ADO. For larger crates, split
   detail into companion docs (e.g. `docs/design/<topic>.md`) linked from
   it.
-
-Optionally, a crate may keep implementation plans under
-`docs/implementation-plans/NNNN.md` (rolling, zero-padded) to sequence
-large multi-commit efforts. They are never required — skip them for small
-crates or self-contained changes.
+- Optional `docs/principles.md` - basic principles of the crate, should not be
+  edited by agents, unless specifically directed by the user, and even
+  in those cases, intent should be verified with the user to change the
+  principle.
+- Optionally, a crate may keep implementation plans under
+  `docs/implementation-plans/NNNN.md` (rolling, zero-padded) to sequence
+  large multi-commit efforts. They are never required — skip them for small
+  crates or self-contained changes.
 
 ### Why they exist
 
@@ -73,6 +88,8 @@ When you implement a change in a crate:
 - **If the change is purely internal** (refactor with no contract delta,
   dependency bump, test-only), no doc update is required — but fix any
   design drift you notice opportunistically.
+- Make sure that the change does not go against the crate's principles
+  if they exist (`docs/principles.md`)
 
 ### Don't reference design docs from code
 

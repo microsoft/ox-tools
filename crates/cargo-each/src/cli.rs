@@ -34,11 +34,13 @@ pub(crate) enum CargoCli {
 pub(crate) struct EachArgs {
     // --- selection (mirrors cargo build) ---
     /// Select a workspace member. Repeatable. Accepts a name, a
-    /// `name@version` spec, or a Unix glob (`tokio-*`).
+    /// `name@version` spec, a Unix glob (`tokio-*`), or a source-qualified
+    /// Cargo package ID. Input forms may be mixed.
     #[arg(short = 'p', long = "package", value_name = "SPEC")]
     pub(crate) packages: Vec<String>,
 
     /// Read package specs from a UTF-8 file, one per nonempty line.
+    /// Accepts mixed name/version specs and source-qualified package IDs.
     /// Repeatable; specs are unioned with --package.
     #[arg(long = "package-file", value_name = "PATH")]
     pub(crate) package_files: Vec<PathBuf>,
@@ -92,7 +94,8 @@ pub(crate) struct EachArgs {
 
     // --- execution ---
     /// Run the command exactly once for the whole set (skip when empty)
-    /// instead of once per member. Use `{packages}` to inject the selection.
+    /// instead of once per member. Use `{packages}` for name/version selection
+    /// flags or `{cargo-specs}` for source-qualified selection flags.
     #[arg(long)]
     pub(crate) once: bool,
 

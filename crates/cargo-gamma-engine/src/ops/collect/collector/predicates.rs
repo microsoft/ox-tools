@@ -463,14 +463,12 @@ fn callee_path(callee: &Expr) -> Option<&Path> {
 /// Returns whether a `default` method path selects the standard trait.
 fn is_standard_default_callee(path: &Path, defaults: &DefaultPaths, defaulted_types: &[String]) -> bool {
     let Some(method) = path.segments.last() else {
-        // #[gamma::skip(return_value.default, tag = "equivalent", reason = "false is already the default bool value.")]
         return false;
     };
 
     // Inputs rejected by this guard are also rejected by both recognition branches below, so
     // weakening the guard cannot change the answer.
     if method.ident != "default" {
-        // #[gamma::skip(return_value.default, tag = "equivalent", reason = "false is already the default bool value.")]
         return false;
     }
 
@@ -504,7 +502,6 @@ pub(super) fn is_capacity_result(expression: &Expr) -> bool {
 /// Returns whether a signature promises a number, which is the only thing worth perturbing by one.
 pub(super) fn is_numeric_return(output: &ReturnType) -> bool {
     let ReturnType::Type(_arrow, ty) = output else {
-        // #[gamma::skip(return_value.default, tag = "equivalent", reason = "false is already the default bool value.")]
         return false;
     };
 
@@ -624,12 +621,10 @@ impl<'ast> Visit<'ast> for BreakFinder<'_> {
 /// Returns a type's `index`th generic argument, so `Result<T, E>` can be asked for either side.
 pub(super) fn payload(ty: &Type, index: usize) -> Option<&Type> {
     let Type::Path(path) = strip(ty) else {
-        // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
         return None;
     };
 
     let PathArguments::AngleBracketed(args) = &path.path.segments.last()?.arguments else {
-        // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
         return None;
     };
 
@@ -687,11 +682,9 @@ fn primitive_type_name(ty: &Type) -> Option<String> {
         return primitive_type_name(&group.elem);
     }
     let Type::Path(path) = ty else {
-        // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
         return None;
     };
     if path.qself.is_some() {
-        // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
         return None;
     }
     let segments = path

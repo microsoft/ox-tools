@@ -12,14 +12,69 @@ use std::fs;
 
 use camino::{Utf8Path, Utf8PathBuf};
 use cargo_gamma_lib::internals::discover::{CompilerExclusions, ContextDigest, Killer, Killers, RunRecord, Term, Trust};
+#[cfg(feature = "system-tests")]
+use cargo_gamma_lib::internals::discover::{Hints, hints_path};
 use cargo_gamma_lib::internals::model::{Mutant, Outcome};
 use cargo_gamma_lib::internals::ops::{Selection, collect_candidates, into_mutants};
 use cargo_gamma_lib::internals::parse::SourceFile;
 use cargo_gamma_lib::testing::ci_fixture::mutant;
 use cargo_gamma_lib::testing::workdir;
+#[cfg(feature = "system-tests")]
+use cargo_gamma_lib::testing::{Sink, run, write_project};
 use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
 
 const FILE: &str = "compiler-exclusions.json";
+
+#[cfg(feature = "system-tests")]
+#[test]
+fn a_checked_in_unviable_hint_cannot_hide_a_compilable_survivor_in_a_fresh_campaign() {
+    let directory = workdir("compiler-hint-executed-");
+    let base = Utf8Path::from_path(directory.path()).unwrap();
+    let root = base.join("subject");
+    let source = "pub fn answer() -> bool { true }\n\
+        #[cfg(test)] mod tests {\n\
+        #[test] fn reaches_answer() { std::hint::black_box(super::answer()); }\n\
+        }\n";
+    write_project(root.as_std_path(), &[("src/lib.rs", source)]);
+    let parsed = SourceFile::parse("src/lib.rs", source.to_owned()).unwrap();
+    let selection = Selection::parse("literal.bool_flip").unwrap();
+    let mut population = into_mutants(&parsed, "subject", collect_candidates(&parsed, &selection));
+    assert_eq!(population.len(), 1);
+    population[0].outcome = Outcome::CompileError;
+    let record = RunRecord::from_run(&root, &population, &ContextDigest::default(), &[]);
+    Hints::promoted(&record, &population).write(&hints_path(&root)).unwrap();
+    assert_eq!(Hints::load(&root).ordering(), [population[0].id.as_str()]);
+
+    let artifacts = base.join("artifacts");
+    let cache = base.join("cache");
+    let mut host = Sink::default();
+    let code = run(
+        &mut host,
+        [
+            "cargo-gamma",
+            "run",
+            "--dir",
+            root.as_str(),
+            "--cache-dir",
+            cache.as_str(),
+            "--artifact-dir",
+            artifacts.as_str(),
+            "--mutators",
+            "literal.bool_flip",
+            "--jobs",
+            "1",
+            "--min-score",
+            "100",
+        ],
+    );
+    assert_eq!(code, 2, "{}{}", host.out(), host.err());
+    let report: serde_json::Value = serde_json::from_slice(&fs::read(artifacts.join("gamma-report.json")).unwrap()).unwrap();
+    let mutants = report["files"]["src/lib.rs"]["mutants"].as_array().unwrap();
+    assert_eq!(mutants.len(), 1);
+    assert_eq!(mutants[0]["id"].as_str(), Some(population[0].id.as_str()));
+    assert_eq!(mutants[0]["status"], "Survived", "{}{}", host.out(), host.err());
+    assert!(host.err().contains("below the required"), "{}", host.err());
+}
 
 fn fixture() -> Utf8PathBuf {
     Utf8Path::new(env!("CARGO_MANIFEST_DIR"))

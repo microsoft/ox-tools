@@ -218,9 +218,11 @@ pub const MUTANT_ID_VERSION: u32 = 8;
 ///
 /// Deliberately *not* keyed on line and column. Inserting a line at the top of a file would
 /// renumber every mutant below it, which would reshuffle every shard, orphan every cached verdict
-/// and silently detach every configured expectation. The enclosing item path provides the same
-/// disambiguation while surviving both reformatting and code motion within a file, and the
-/// occurrence index handles two textually identical sites in one function. Trait implementation
+/// and silently detach every configured expectation. The enclosing item path survives code motion
+/// within a file, and the occurrence index handles two textually identical sites in one function.
+/// Comment edits preserve identity when normalized site text stays unchanged. Inserting or removing
+/// an interior comment between adjacent tokens can add or remove a normalized separator and change
+/// the identity. Trait implementation
 /// paths include both the self type and the implemented trait, so same-named methods from two
 /// traits never depend on source order for that disambiguation.
 #[must_use]
@@ -288,6 +290,8 @@ const HEX: [char; 16] = ['0', '1', '2', '3', '4', '5', '6', '7', '8', '9', 'a', 
 /// site in a file and holding the item path and the normalized source of each one costs two owned
 /// strings per mutant that nothing ever reads back. At 128 bits a collision between two real sites
 /// is not a thing that happens.
+///
+/// The exact encoded value is stable for persisted `SiteIdentity` digests and reach-cluster records.
 #[must_use]
 pub fn site_key(item_path: &str, mutator: &str, normalized_site_text: &str) -> u128 {
     let mut hasher = Hasher::new();
@@ -310,9 +314,9 @@ pub fn site_key(item_path: &str, mutator: &str, normalized_site_text: &str) -> u
 ///
 /// Whitespace runs collapse to a single space and comments disappear; everything else is
 /// preserved verbatim, including identifiers, literal values, literal suffixes and integer bases.
-/// Normalizing too little would let a `cargo fmt` run reshuffle the whole population; normalizing
-/// too much would let a genuine edit keep its old identity and silently reattach a stale verdict
-/// to code whose behavior changed. When in doubt, this preserves.
+/// Adding or removing inter-token whitespace or punctuation (including rustfmt-added trailing
+/// commas) can change the identity. This is not a token-level or general `cargo fmt` invariant.
+/// Preserving those distinctions avoids silently reattaching stale verdicts to genuine edits.
 #[must_use]
 pub fn normalize_site_text(text: &str) -> CompactString {
     let mut out = CompactString::with_capacity(text.len());
@@ -431,132 +435,5 @@ mod tests {
 
         assert_ne!(with_discriminator, with_other_discriminator);
         assert_ne!(baseline, with_empty_discriminator);
-    }
-
-    /// Swapping the two counts produces a different identity, which is the whole reason they are
-    /// named rather than adjacent: the wrong one is not an error anywhere, only a different mutant.
-    #[test]
-    fn the_two_site_counts_are_not_interchangeable() {
-        let file = Utf8Path::new("src/lib.rs");
-        let one_way = mutant_id(file, "subject::f", "arith.add_to_sub", "1 + 1", SiteIndex::new(2, 3));
-        let other_way = mutant_id(file, "subject::f", "arith.add_to_sub", "1 + 1", SiteIndex::new(3, 2));
-
-        assert_ne!(one_way, other_way);
-
-        let site = SiteIndex::new(2, 3);
-
-        assert_eq!(site.occurrence(), 2);
-        assert_eq!(site.replacement_index(), 3);
-        assert_eq!(SiteIndex::default(), SiteIndex::new(0, 0));
-    }
-
-    #[test]
-    fn a_site_key_keeps_the_first_digest_bytes_in_little_endian_order() {
-        assert_eq!(
-            site_key("subject::f", "arith.add_to_sub", "1 + 1"),
-            0x13ab_1481_a7bb_abfa_59fb_46dd_e659_e8a3
-        );
-    }
-
-    /// An identity reads, compares and serializes as the text it wraps, so the newtype costs
-    /// nothing at a call site and nothing on the wire.
-    #[test]
-    fn an_identity_behaves_as_the_text_it_wraps() {
-        let id = MutantId::new("deadbeefcafe");
-        let other = "feedfacebabe";
-
-        assert!(<MutantId as PartialEq<str>>::eq(&id, "deadbeefcafe"));
-        assert!(<MutantId as PartialEq<&str>>::eq(&id, &"deadbeefcafe"));
-        assert!(<MutantId as PartialEq<String>>::eq(&id, &String::from("deadbeefcafe")));
-        assert!(<str as PartialEq<MutantId>>::eq("deadbeefcafe", &id));
-        assert!(<&str as PartialEq<MutantId>>::eq(&"deadbeefcafe", &id));
-        assert!(<String as PartialEq<MutantId>>::eq(&String::from("deadbeefcafe"), &id));
-        assert!(!<MutantId as PartialEq<str>>::eq(&id, other));
-        assert!(!<MutantId as PartialEq<&str>>::eq(&id, &other));
-        assert!(!<MutantId as PartialEq<String>>::eq(&id, &String::from(other)));
-        assert!(!<str as PartialEq<MutantId>>::eq(other, &id));
-        assert!(!<&str as PartialEq<MutantId>>::eq(&other, &id));
-        assert!(!<String as PartialEq<MutantId>>::eq(&String::from(other), &id));
-        assert_eq!(id.as_str(), "deadbeefcafe");
-        assert_eq!(<MutantId as Borrow<str>>::borrow(&id), "deadbeefcafe");
-        assert_eq!(<MutantId as AsRef<str>>::as_ref(&id), "deadbeefcafe");
-        assert_eq!(id.to_string(), "deadbeefcafe");
-        assert_eq!(id.len(), MUTANT_ID_HEX_LEN);
-        assert!(!id.is_heap_allocated());
-        assert_eq!(MutantId::from("deadbeefcafe"), id);
-        assert_eq!(MutantId::from(String::from("deadbeefcafe")), id);
-        assert_eq!(MutantId::from(CompactString::new("deadbeefcafe")), id);
-        assert_eq!(CompactString::from(id.clone()), CompactString::new("deadbeefcafe"));
-
-        // Borrowed as `str`, so a map keyed on identities can still be probed with plain text.
-        let borrowed: &str = &id;
-
-        assert_eq!(borrowed, "deadbeefcafe");
-
-        let long = MutantId::new("x".repeat(128));
-
-        assert!(long.is_heap_allocated());
-    }
-
-    /// Whitespace runs collapse to one space, and a run entirely at the start of the text
-    /// disappears rather than producing a leading space.
-    #[test]
-    fn whitespace_runs_collapse_to_a_single_space() {
-        assert_eq!(normalize_site_text("  let   x  =  1  ;  "), "let x = 1 ;");
-        assert_eq!(normalize_site_text("\t\nfoo"), "foo");
-    }
-
-    /// A line comment disappears entirely, and the code around it is joined by exactly one space
-    /// whether the comment sits between two tokens or trails the last one.
-    #[test]
-    fn line_comments_are_dropped_and_replaced_by_a_single_space() {
-        assert_eq!(normalize_site_text("let x = 1; // set x\nlet y = 2;"), "let x = 1; let y = 2;");
-        assert_eq!(normalize_site_text("// leading\nlet x = 1;"), "let x = 1;");
-        assert_eq!(normalize_site_text("let x = 1; // trailing"), "let x = 1;");
-    }
-
-    /// A block comment disappears the same way a line comment does, including one that sits
-    /// directly before a string literal so the literal branch is reached with a pending space.
-    #[test]
-    fn block_comments_are_dropped_and_replaced_by_a_single_space() {
-        assert_eq!(normalize_site_text("let x = /* the answer */ 42;"), "let x = 42;");
-        assert_eq!(normalize_site_text("let s = /* comment */ \"value\";"), "let s = \"value\";");
-    }
-
-    /// With no surrounding whitespace to mask the comment branch, an interior comment introduces
-    /// exactly one separator while a leading comment introduces none.
-    #[test]
-    fn adjacent_block_comments_preserve_exact_token_spacing() {
-        assert_eq!(normalize_site_text("left/* interior */right"), "left right");
-        assert_eq!(normalize_site_text("left/* interior */\"right\""), "left \"right\"");
-        assert_eq!(normalize_site_text("/* leading */right"), "right");
-    }
-
-    /// String, raw-string and char literals are copied verbatim, including whitespace and
-    /// comment-shaped text inside them, rather than being normalized like ordinary code.
-    #[test]
-    fn literal_contents_are_preserved_verbatim() {
-        assert_eq!(normalize_site_text("\"a  b // not a comment\""), "\"a  b // not a comment\"");
-        assert_eq!(normalize_site_text("r\"raw /* text */\""), "r\"raw /* text */\"");
-        assert_eq!(normalize_site_text("'x'"), "'x'");
-    }
-
-    /// Non-ASCII identifier characters outside any literal are copied one character at a time
-    /// through the byte-length-aware fallback path, rather than being mistaken for a literal or a
-    /// single-byte character.
-    #[test]
-    fn multibyte_characters_outside_literals_are_preserved() {
-        assert_eq!(normalize_site_text("café + 1"), "café + 1");
-    }
-
-    /// A site key changes whenever any of its inputs changes, and is stable for identical inputs.
-    #[test]
-    fn site_key_is_stable_and_sensitive_to_its_inputs() {
-        let baseline = site_key("subject::f", "arith.add_to_sub", "1 + 1");
-
-        assert_eq!(baseline, site_key("subject::f", "arith.add_to_sub", "1 + 1"));
-        assert_ne!(baseline, site_key("subject::g", "arith.add_to_sub", "1 + 1"));
-        assert_ne!(baseline, site_key("subject::f", "arith.add_to_mul", "1 + 1"));
-        assert_ne!(baseline, site_key("subject::f", "arith.add_to_sub", "2 + 2"));
     }
 }

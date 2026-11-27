@@ -168,9 +168,17 @@ hand, so every change appears in a PR diff and is reviewed.
 - `--jobs <N>` — positive concurrency forwarded consistently to nextest's
   build and test execution.
 - `--coverage-dir <path>` — artifact directory, default
-  `target/coverage`. Each configuration gets a distinct released-surface LCOV
-  file. Those exact files feed evaluation and are the intended CI upload
-  inputs.
+  `target/coverage`. Each configuration gets a distinct LCOV file. By default
+  these files are released-surface filtered, feed evaluation, and are the
+  intended CI upload inputs.
+- `--collect-only` — collect and publish raw LCOV without filtering, evaluating
+  coverage thresholds, or writing a verdict summary. Successful collection
+  releases its scratch builds after preserving raw reports in `--coverage-dir`;
+  collection failures retain diagnostics. Evaluate the published raw reports
+  together in a later invocation so source-ownership evidence from every
+  configuration participates in filtering. These raw files are diagnostic
+  inputs, not released-surface-filtered upload artifacts. Cannot be combined
+  with `--no-coverage-target`.
 - `--no-coverage-target <triple>` — explicitly run plain nextest without
   coverage collection or gating when the effective target matches. Repeatable;
   the default list is empty. The effective target is the explicit `--target`
@@ -446,6 +454,13 @@ cargo coverage-gate \
   --lcov target/coverage/lcov-no-default.info
 ```
 
+For runners that cannot retain both feature builds at once, collect each
+configuration with `run --collect-only --configuration <configuration>`,
+then evaluate the two published raw files together as above. Applying filtering
+or the gate to each report separately is not equivalent to filtering and gating
+their combined coverage: source-ownership evidence from one configuration may
+keep lines measured by another.
+
 Library callers get released-surface semantics from the ordinary `evaluate*`
 and `filter_lcov*` APIs. Callers that intentionally need every attributed LCOV
 line, including tests and non-release targets, use the explicitly named
@@ -464,7 +479,15 @@ For each requested feature configuration, `run`:
 2. allocates a fresh private coverage target for each feature configuration
    beneath a unique per-invocation scratch directory;
 3. invokes cargo-llvm-cov with nextest, `--no-report`, `--no-tests=pass`, and
-   `--locked` for the selected package set;
+   `--locked` for the selected package set. It sets
+   `LLVM_PROFILE_FILE_NAME=coverage-%8m.profraw` for this invocation:
+   LLVM merges counters online into an eight-slot pool per instrumented binary
+   signature instead of creating a profile per test process. Eight slots bound
+   raw-profile growth while allowing concurrent writers; LLVM owns profile
+   locking and counter merging. The pattern deliberately omits `%p`, which
+   would isolate each process and defeat reuse. This overrides an inherited
+   filename pattern, remains inside the configuration's private target, and
+   does not change test selection or coverage policy;
 4. invokes `cargo llvm-cov report --lcov` for the same package and target
    selection, delegating raw-profile merging, ordinary and nested trybuild
    object discovery, and the complete default filename exclusions to
@@ -476,6 +499,10 @@ For each requested feature configuration, `run`:
    parsed, or safely owned;
 6. atomically publishes the filtered report to its stable consumer path under
    `--coverage-dir` and passes that exact path to the evaluator.
+
+With `--collect-only`, steps 5 and 6 instead validate and atomically publish
+the raw LCOV to the same stable paths. Source analysis and evaluation are
+deferred to a later multi-LCOV evaluation, after collection scratch is removed.
 
 Selectors are resolved against workspace members only. Before subprocess
 execution, explicit selections become the source-qualified package IDs supplied

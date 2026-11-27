@@ -4,13 +4,13 @@
 //! Mutations whose validity depends on standard control-flow and comparison enum identity.
 
 use compact_str::format_compact;
-use syn::spanned::Spanned as _;
 use syn::visit::{self, Visit};
 use syn::{Block, Expr, ExprCall, ExprMethodCall, ExprPath, FnArg, Ident, PatIdent, Signature, Stmt, Type, TypePath};
 
 use super::types::Types;
 use super::values::strip;
 use super::{Collector, Confidence, Shape, noop};
+use crate::parse::Extent as _;
 
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
@@ -74,7 +74,6 @@ fn plain_expression(expression: &Expr) -> &Expr {
 
 fn constant_return_expression(body: &Block) -> Option<&Expr> {
     let [Stmt::Expr(expression, semicolon)] = body.stmts.as_slice() else {
-        // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
         return None;
     };
     match expression {
@@ -104,11 +103,9 @@ impl Collector<'_> {
 
     pub(super) fn constant_default_control_flow_return(&self, signature: &Signature, body: &Block, types: &Types<'_>) -> Option<String> {
         let Expr::Call(call) = plain_expression(constant_return_expression(body)?) else {
-            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
             return None;
         };
         if !call.attrs.is_empty() || call.args.len() != 1 {
-            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
             return None;
         }
         // #[gamma::skip(iter.first_to_last, try.propagate_to_unwrap, tag = "equivalent", reason = "The preceding call.args.len()==1 check guarantees that first exists and is the same element as last.")]
@@ -129,7 +126,6 @@ impl Collector<'_> {
             _ => false,
         };
         if !known_default {
-            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
             return None;
         }
         let path = plain_variant_path(&call.func)?;
@@ -145,7 +141,6 @@ impl Collector<'_> {
         name: &str,
     ) -> Option<String> {
         if self.variant_is_shadowed(path) {
-            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
             return None;
         }
         if let Some(name) = path.path.get_ident() {
@@ -156,7 +151,6 @@ impl Collector<'_> {
                 }
             }
             if binding.found {
-                // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
                 return None;
             }
         }
@@ -196,12 +190,12 @@ impl Collector<'_> {
         };
         self.emit_at_conditionally(
             mutator,
-            node.span().byte_range(),
+            node.extent().byte_range(),
             replacement,
             0,
             Shape::Expr,
             Confidence::Proven,
-            self.admissible_defaults.contains(&node.span().byte_range()) || explicit_default,
+            self.admissible_defaults.contains(&node.extent().byte_range()) || explicit_default,
         );
     }
 
@@ -223,7 +217,7 @@ impl Collector<'_> {
             _ => return,
         };
         for (mutator, replacement) in replacements {
-            self.emit(mutator, node.span(), format_compact!("::{root}::cmp::Ordering::{replacement}"), 0);
+            self.emit(mutator, node.extent(), format_compact!("::{root}::cmp::Ordering::{replacement}"), 0);
         }
     }
 

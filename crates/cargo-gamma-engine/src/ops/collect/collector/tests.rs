@@ -39,6 +39,22 @@ fn with_source_facts(source: &str, selector: &str, check: impl FnOnce(&mut Colle
 }
 
 #[test]
+fn result_shaped_identity_aliases_do_not_enable_direct_default_replacements() {
+    for (name, expected_count) in [("Result", 0), ("Value", 1)] {
+        let source = format!("type {name}<T> = T; fn f(value: {name}<u8>) -> {name}<u8> {{ return value; }}");
+        let file = SourceFile::parse("fixture.rs", source.clone()).unwrap();
+
+        for selector in ["parameter.default_shadow", "return_value.default"] {
+            let candidates = collect_in(&file, &Selection::parse(selector).unwrap(), &CfgSet::unconditional());
+            assert_eq!(candidates.len(), expected_count, "{selector}: {source}: {candidates:?}");
+            for candidate in candidates {
+                assert!(candidate.replacement.contains("Default::default()"), "{candidate:?}");
+            }
+        }
+    }
+}
+
+#[test]
 fn unrelated_package_declarations_do_not_reintroduce_literal_default_mutants() {
     let cfg = CfgSet::unconditional();
     let root = SourceFile::parse("lib.rs", "mod consumer; mod unrelated { pub struct Default; }".into()).unwrap();
@@ -2447,6 +2463,13 @@ fn fallback_and_iterator_rewrites_keep_their_exact_shape_index_and_confidence() 
     for (source, selector, replacement, shape, confidence) in [
         (
             "fn f() { let _ = option.unwrap_or(9); }",
+            "fallback.unwrap_or_to_default",
+            "(option).unwrap_or_default()",
+            super::Shape::Expr,
+            super::Confidence::Optimistic,
+        ),
+        (
+            "fn f(option: Option<u8>) { let _ = option.unwrap_or(9); }",
             "fallback.unwrap_or_to_default",
             "(option).unwrap_or_default()",
             super::Shape::Expr,
@@ -6264,6 +6287,21 @@ fn a_zero_width_site_offers_nothing() {
 }
 
 #[test]
+fn transforming_method_attributes_keep_unused_primitive_parameter_shadows() {
+    for source in [
+        "struct Subject; impl Subject { #[external::transform] fn execute(unused: u8) -> u8 { 1 } }",
+        "trait Subject { #[external::transform] fn execute(unused: u8) -> u8 { 1 } }",
+    ] {
+        let found = mutators(source, "parameter.default_shadow", &CfgSet::unconditional());
+        assert_eq!(found.len(), 1, "{source}: {found:?}");
+
+        let ordinary = source.replace("#[external::transform]", "#[allow(unused_variables)]");
+        let found = mutators(&ordinary, "parameter.default_shadow", &CfgSet::unconditional());
+        assert!(found.is_empty(), "{ordinary}: {found:?}");
+    }
+}
+
+#[test]
 fn parameter_shadowing_skips_const_functions_and_reference_patterns() {
     for source in [
         "const fn f(value: usize) -> usize { value }",
@@ -6273,6 +6311,61 @@ fn parameter_shadowing_skips_const_functions_and_reference_patterns() {
 
         assert!(found.is_empty(), "{source}: {found:?}");
     }
+}
+
+#[test]
+fn fallback_confidence_requires_a_standard_receiver_api() {
+    for (method, arguments, implementation) in [
+        ("unwrap_or", "7", "fn unwrap_or(self, value: u8) -> u8 { value }"),
+        (
+            "unwrap_or_else",
+            "|| 7",
+            "fn unwrap_or_else(self, value: impl FnOnce() -> u8) -> u8 { value() }",
+        ),
+        (
+            "map_or",
+            "7, |v| v",
+            "fn map_or(self, value: u8, _: impl FnOnce(u8) -> u8) -> u8 { value }",
+        ),
+        (
+            "map_or_else",
+            "|| 7, |v| v",
+            "fn map_or_else(self, value: impl FnOnce() -> u8, _: impl FnOnce(u8) -> u8) -> u8 { value() }",
+        ),
+    ] {
+        let source =
+            format!("struct Lenient; impl Lenient {{ {implementation} }} fn f(value: Lenient) -> u8 {{ value.{method}({arguments}) }}");
+        let found = collect_in(
+            &SourceFile::parse("test.rs", source).unwrap(),
+            &Selection::parse("fallback").unwrap(),
+            &CfgSet::unconditional(),
+        );
+        assert_eq!(found.len(), 1, "{method}: {found:?}");
+        assert_eq!(found[0].confidence, Confidence::Optimistic, "{method}");
+
+        let source = format!("fn f(value: Option<u8>) -> u8 {{ value.{method}({arguments}) }}");
+        let found = collect_in(
+            &SourceFile::parse("test.rs", source).unwrap(),
+            &Selection::parse("fallback").unwrap(),
+            &CfgSet::unconditional(),
+        );
+        assert_eq!(found.len(), 1, "{method}: {found:?}");
+        assert_eq!(found[0].confidence, Confidence::Proven, "{method}");
+    }
+}
+
+#[test]
+fn fallback_to_default_requires_a_defaultable_fallback_type() {
+    let source = "fn f(value: Option<Result<u8, ()>>, fallback: Result<u8, ()>) -> Result<u8, ()> { value.unwrap_or(fallback) }";
+    assert_eq!(
+        mutators(source, "fallback.unwrap_or_to_default", &CfgSet::unconditional()),
+        [] as [&str; 0]
+    );
+    let source = "fn f(value: Option<Option<u8>>, fallback: Option<u8>) -> Option<u8> { value.unwrap_or(fallback) }";
+    assert_eq!(
+        mutators(source, "fallback.unwrap_or_to_default", &CfgSet::unconditional()),
+        ["fallback.unwrap_or_to_default"]
+    );
 }
 
 #[test]

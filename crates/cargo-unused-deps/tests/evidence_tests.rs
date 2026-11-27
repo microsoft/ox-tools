@@ -89,6 +89,93 @@ fn command() -> Command {
     command
 }
 
+fn copy_tree(source: &Path, destination: &Path) -> std::io::Result<()> {
+    fs::create_dir_all(destination)?;
+    for entry in fs::read_dir(source)? {
+        let entry = entry?;
+        let target = destination.join(entry.file_name());
+        if entry.file_type()?.is_dir() {
+            copy_tree(&entry.path(), &target)?;
+        } else {
+            fs::copy(entry.path(), target)?;
+        }
+    }
+    Ok(())
+}
+
+fn copied_fixture(name: &str) -> TempDir {
+    let source = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests").join("fixtures").join(name);
+    let destination = TempDir::new().expect("failed to create fixture directory");
+    copy_tree(&source, destination.path()).expect("failed to copy checked-in fixture");
+    destination
+}
+
+/// This must use real Cargo: mocked command construction cannot detect a
+/// workspace-package glob becoming ambiguous with a registry dependency.
+#[test]
+fn cargo_package_globs_keep_evidence_on_the_workspace_member() {
+    let fixture = copied_fixture("package-glob-collision");
+    let output = command()
+        .current_dir(fixture.path())
+        .arg("unused-deps")
+        .arg("--manifest-path")
+        .arg(fixture.path().join("Cargo.toml"))
+        .args(["--package", "twin@0.1.0"])
+        .env("CARGO_NET_OFFLINE", "true")
+        .env("CARGO_TARGET_DIR", fixture.path().join("target"))
+        .output()
+        .expect("failed to execute the binary");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let diagnostics = format!("stdout:\n{stdout}\nstderr:\n{stderr}");
+
+    let lockfile = fs::read_to_string(fixture.path().join("Cargo.lock")).expect("Cargo must resolve the fixture and write its lockfile");
+    let lock = lockfile
+        .parse::<toml_edit::DocumentMut>()
+        .expect("Cargo's lockfile must remain valid TOML");
+    let packages = lock
+        .get("package")
+        .and_then(toml_edit::Item::as_array_of_tables)
+        .expect("Cargo's lockfile must contain package records");
+    let twins = packages
+        .iter()
+        .filter(|package| package.get("name").and_then(toml_edit::Item::as_str) == Some("twin"))
+        .filter(|package| package.get("version").and_then(toml_edit::Item::as_str) == Some("0.1.0"))
+        .collect::<Vec<_>>();
+
+    assert_eq!(twins.len(), 2, "the fixture must contain the collision: {lockfile}");
+    assert_eq!(
+        twins.iter().filter(|package| package.contains_key("source")).count(),
+        1,
+        "one twin must come from the synthetic registry and one from the workspace: {lockfile}"
+    );
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "the selected finding must fail the check: {diagnostics}"
+    );
+    assert!(
+        stderr.contains("twin [dependencies] doc-only: only development units load it"),
+        "the workspace member's doctest must provide evidence: {diagnostics}"
+    );
+    assert!(
+        !stderr.contains("library-used:"),
+        "the workspace member's compile evidence must reach the verdict: {diagnostics}"
+    );
+    assert!(
+        !stderr.contains("failed while collecting doctest evidence"),
+        "doctest collection must select the workspace member: {diagnostics}"
+    );
+    assert!(
+        !stderr.contains("registry twin was selected"),
+        "Cargo must not select the same-name registry package: {diagnostics}"
+    );
+    assert!(
+        stderr.contains("Found 1 dependency problem"),
+        "the doctest-only dependency must be the only finding: {diagnostics}"
+    );
+}
+
 /// A fixture workspace: one `main` package plus a leaf crate per dependency.
 struct Fixture {
     dir: TempDir,

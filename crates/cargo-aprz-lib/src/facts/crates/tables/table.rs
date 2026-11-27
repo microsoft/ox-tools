@@ -6,8 +6,8 @@ use std::fs::{File, Metadata, OpenOptions};
 use std::io::{BufWriter, Read as IoRead, Seek, SeekFrom, Write};
 use std::path::Path;
 
-use chrono::{DateTime, TimeZone, Utc};
 use csv::{Reader, StringRecord};
+use jiff::Timestamp;
 use mmap_rs::{Mmap, MmapFlags, MmapOptions};
 use ohno::IntoAppError;
 use serde::de::Deserialize;
@@ -36,9 +36,9 @@ pub trait Table: Sized {
     fn read_row<'a>(reader: &mut RowReader<'a>) -> Self::Row<'a>;
 
     // Table construction and opening
-    fn open_with(mmap: Mmap, max_ttl: Duration, now: DateTime<Utc>) -> Result<Self>;
+    fn open_with(mmap: Mmap, max_ttl: Duration, now: Timestamp) -> Result<Self>;
 
-    fn open(tables_root: impl AsRef<Path>, max_ttl: Duration, now: DateTime<Utc>) -> Result<Self> {
+    fn open(tables_root: impl AsRef<Path>, max_ttl: Duration, now: Timestamp) -> Result<Self> {
         open_table_with::<Self, _>(
             tables_root.as_ref(),
             max_ttl,
@@ -49,7 +49,7 @@ pub trait Table: Sized {
         )
     }
 
-    fn create_table(tables_root: impl AsRef<Path>, csv_entry: impl IoRead, now: DateTime<Utc>) -> Result<File> {
+    fn create_table(tables_root: impl AsRef<Path>, csv_entry: impl IoRead, now: Timestamp) -> Result<File> {
         let tables_root = tables_root.as_ref();
         let path = tables_root.join(Self::TABLE_NAME);
 
@@ -77,13 +77,13 @@ pub trait Table: Sized {
     // Runtime data access
     fn iter(&self) -> impl Iterator<Item = (Self::Row<'_>, Self::Index)>;
     fn get(&self, index: Self::Index) -> Self::Row<'_>;
-    fn timestamp(&self) -> DateTime<Utc>;
+    fn timestamp(&self) -> Timestamp;
 }
 
 fn open_table_with<T: Table, F>(
     tables_root: &Path,
     max_ttl: Duration,
-    now: DateTime<Utc>,
+    now: Timestamp,
     open: impl FnOnce(&Path) -> std::io::Result<F>,
     metadata: impl FnOnce(&F) -> std::io::Result<Metadata>,
     load_snapshot: impl FnOnce(&F, usize) -> Result<Mmap>,
@@ -112,7 +112,7 @@ fn write_table_header_placeholder(writer: &mut impl Write) -> Result<()> {
     Ok(())
 }
 
-fn write_table_contents<T: Table>(writer: &mut (impl Write + Seek), csv_entry: impl IoRead, now: DateTime<Utc>) -> Result<()> {
+fn write_table_contents<T: Table>(writer: &mut (impl Write + Seek), csv_entry: impl IoRead, now: Timestamp) -> Result<()> {
     write_table_header_placeholder(writer)?;
 
     let mut csv_reader = Reader::from_reader(csv_entry);
@@ -126,7 +126,7 @@ fn write_table_contents<T: Table>(writer: &mut (impl Write + Seek), csv_entry: i
     }
 
     let count = row_writer.row_count();
-    let timestamp = now.timestamp().max(0).cast_unsigned();
+    let timestamp = now.as_second().max(0).cast_unsigned();
     drop(row_writer);
 
     writer.write_all(&[0u8; 10]).into_app_err("writing table padding")?;
@@ -222,7 +222,7 @@ macro_rules! define_table {
             pub struct [<$name_snake:camel Table>] {
                 mmap: mmap_rs::Mmap,
                 count: u64,
-                timestamp: chrono::DateTime<chrono::Utc>,
+                timestamp: jiff::Timestamp,
             }
 
             impl super::Table for [<$name_snake:camel Table>] {
@@ -239,7 +239,7 @@ macro_rules! define_table {
                 fn read_row<'a>($reader: &mut super::RowReader<'a>) -> Self::Row<'a>
                     $read_body
 
-                fn open_with(mmap: mmap_rs::Mmap, max_ttl: core::time::Duration, now: chrono::DateTime<chrono::Utc>) -> crate::Result<Self> {
+                fn open_with(mmap: mmap_rs::Mmap, max_ttl: core::time::Duration, now: jiff::Timestamp) -> crate::Result<Self> {
                     let (count, timestamp) = super::validate_table_header(&mmap, max_ttl, now)?;
                     Ok(Self { mmap, count, timestamp })
                 }
@@ -257,7 +257,7 @@ macro_rules! define_table {
                     Self::read_row(&mut reader)
                 }
 
-                fn timestamp(&self) -> chrono::DateTime<chrono::Utc> {
+                fn timestamp(&self) -> jiff::Timestamp {
                     self.timestamp
                 }
             }
@@ -338,7 +338,7 @@ macro_rules! define_rows {
 pub(crate) use define_rows;
 pub(crate) use define_table;
 
-pub fn validate_table_header(mmap: &Mmap, max_ttl: Duration, now: DateTime<Utc>) -> Result<(u64, DateTime<Utc>)> {
+pub fn validate_table_header(mmap: &Mmap, max_ttl: Duration, now: Timestamp) -> Result<(u64, Timestamp)> {
     use ohno::bail;
 
     if mmap.len() < TABLE_HEADER_SIZE {
@@ -360,7 +360,7 @@ pub fn validate_table_header(mmap: &Mmap, max_ttl: Duration, now: DateTime<Utc>)
     let table_timestamp = read_header_u64(mmap, 16);
 
     // Check TTL
-    let now_secs = now.timestamp().max(0).cast_unsigned();
+    let now_secs = now.as_second().max(0).cast_unsigned();
     let age_seconds = now_secs.saturating_sub(table_timestamp);
     let age = Duration::from_secs(age_seconds);
 
@@ -368,10 +368,8 @@ pub fn validate_table_header(mmap: &Mmap, max_ttl: Duration, now: DateTime<Utc>)
         bail!("table is stale: age {}s exceeds TTL {}s", age.as_secs(), max_ttl.as_secs());
     }
 
-    let dt = Utc
-        .timestamp_opt(i64::try_from(table_timestamp).into_app_err("timestamp out of range for i64")?, 0)
-        .single()
-        .ok_or_else(|| ohno::app_err!("invalid or out-of-range timestamp"))?;
+    let dt = Timestamp::from_second(i64::try_from(table_timestamp).into_app_err("timestamp out of range for i64")?)
+        .into_app_err("invalid or out-of-range timestamp")?;
 
     Ok((count, dt))
 }
@@ -391,6 +389,7 @@ mod tests {
     use std::fs;
     use std::io::{Cursor, Error, ErrorKind};
 
+    use jiff::ToSpan;
     use serde::Deserialize;
     use tempfile::TempDir;
 
@@ -401,7 +400,7 @@ mod tests {
         let error = open_table_with::<TestTable, _>(
             Path::new("tables"),
             Duration::ZERO,
-            DateTime::UNIX_EPOCH,
+            Timestamp::UNIX_EPOCH,
             |path| {
                 assert_eq!(path, Path::new("tables").join(TestTable::TABLE_NAME));
                 Ok("opened table")
@@ -449,7 +448,7 @@ mod tests {
             reader.read_str()
         }
 
-        fn open_with(_mmap: Mmap, _max_ttl: Duration, _now: DateTime<Utc>) -> Result<Self> {
+        fn open_with(_mmap: Mmap, _max_ttl: Duration, _now: Timestamp) -> Result<Self> {
             Ok(Self)
         }
 
@@ -461,8 +460,8 @@ mod tests {
             ""
         }
 
-        fn timestamp(&self) -> DateTime<Utc> {
-            DateTime::UNIX_EPOCH
+        fn timestamp(&self) -> Timestamp {
+            Timestamp::UNIX_EPOCH
         }
     }
 
@@ -616,8 +615,8 @@ mod tests {
 
     #[test]
     fn exactly_sized_table_headers_are_valid() {
-        let now = Utc.with_ymd_and_hms(2024, 1, 2, 3, 4, 5).unwrap();
-        let bytes = header(42, now.timestamp().cast_unsigned());
+        let now: Timestamp = "2024-01-02T03:04:05Z".parse().expect("valid timestamp literal");
+        let bytes = header(42, now.as_second().cast_unsigned());
         let (_dir, mmap) = map_header(&bytes);
 
         let (count, timestamp) = validate_table_header(&mmap, Duration::from_mins(1), now).expect("header is exactly complete");
@@ -628,29 +627,29 @@ mod tests {
 
     #[test]
     fn table_age_equal_to_ttl_is_still_fresh() {
-        let now = Utc.with_ymd_and_hms(2024, 1, 2, 3, 4, 5).unwrap();
-        let table_timestamp = (now - chrono::TimeDelta::seconds(60)).timestamp().cast_unsigned();
+        let now: Timestamp = "2024-01-02T03:04:05Z".parse().expect("valid timestamp literal");
+        let table_timestamp = (now - 60_i32.seconds()).as_second().cast_unsigned();
         let bytes = header(7, table_timestamp);
         let (_dir, mmap) = map_header(&bytes);
 
         let (count, timestamp) = validate_table_header(&mmap, Duration::from_mins(1), now).expect("age equal to TTL is allowed");
 
         assert_eq!(count, 7);
-        assert_eq!(timestamp, now - chrono::TimeDelta::seconds(60));
+        assert_eq!(timestamp, now - 60_i32.seconds());
     }
 
     #[test]
     fn pre_epoch_clock_is_clamped_to_the_epoch() {
-        let now = Utc.timestamp_opt(-1, 0).unwrap();
+        let now = Timestamp::from_second(-1).expect("negative one second is representable");
         let bytes = header(1, 0);
         let (_dir, mmap) = map_header(&bytes);
         let (_, timestamp) = validate_table_header(&mmap, Duration::ZERO, now).expect("a pre-epoch clock cannot make an epoch table stale");
-        assert_eq!(timestamp, DateTime::UNIX_EPOCH);
+        assert_eq!(timestamp, Timestamp::UNIX_EPOCH);
     }
 
     #[test]
     fn invalid_magic_is_rejected() {
-        let now = Utc.with_ymd_and_hms(2024, 1, 2, 3, 4, 5).unwrap();
+        let now: Timestamp = "2024-01-02T03:04:05Z".parse().expect("valid timestamp literal");
         let bytes = [0u8; TABLE_HEADER_SIZE];
         let (_dir, mmap) = map_header(&bytes);
 
@@ -664,19 +663,19 @@ mod tests {
         let bytes = header(1, u64::MAX);
         let (_dir, mmap) = map_header(&bytes);
 
-        let error = validate_table_header(&mmap, Duration::MAX, DateTime::<Utc>::MAX_UTC)
-            .expect_err("u64::MAX cannot be represented as an i64 timestamp");
+        let error =
+            validate_table_header(&mmap, Duration::MAX, Timestamp::now()).expect_err("u64::MAX cannot be represented as an i64 timestamp");
 
         assert!(format!("{error:#}").contains("timestamp out of range for i64"));
     }
 
     #[test]
-    fn chrono_rejects_an_i64_timestamp_outside_its_calendar_range() {
+    fn jiff_rejects_an_i64_timestamp_outside_its_calendar_range() {
         let bytes = header(1, i64::MAX.cast_unsigned());
         let (_dir, mmap) = map_header(&bytes);
 
-        let error = validate_table_header(&mmap, Duration::MAX, DateTime::<Utc>::MAX_UTC)
-            .expect_err("chrono cannot represent the largest i64 timestamp");
+        let error =
+            validate_table_header(&mmap, Duration::MAX, Timestamp::now()).expect_err("jiff cannot represent the largest i64 timestamp");
 
         assert!(format!("{error:#}").contains("invalid or out-of-range timestamp"));
     }
@@ -695,7 +694,7 @@ mod tests {
         fs::write(dir.path().join(TestTable::TABLE_NAME), []).expect("creating an empty table");
 
         let error =
-            TestTable::open(dir.path(), Duration::ZERO, DateTime::UNIX_EPOCH).expect_err("an empty file cannot be opened as a table");
+            TestTable::open(dir.path(), Duration::ZERO, Timestamp::UNIX_EPOCH).expect_err("an empty file cannot be opened as a table");
 
         let diagnostic = format!("{error:#}");
         assert!(
@@ -710,7 +709,7 @@ mod tests {
         let missing_root = dir.path().join("missing");
 
         let error =
-            TestTable::create_table(&missing_root, &b"value\n"[..], DateTime::UNIX_EPOCH).expect_err("the table root does not exist");
+            TestTable::create_table(&missing_root, &b"value\n"[..], Timestamp::UNIX_EPOCH).expect_err("the table root does not exist");
 
         assert!(format!("{error:#}").contains("creating table file"));
         assert!(format!("{error:#}").contains(TestTable::TABLE_NAME));
@@ -722,7 +721,7 @@ mod tests {
         let path = dir.path().join(TestTable::TABLE_NAME);
         fs::write(&path, vec![0xAA; 4096]).expect("writing old table contents");
 
-        drop(TestTable::create_table(dir.path(), &b"value\n"[..], DateTime::UNIX_EPOCH).expect("creating the replacement table"));
+        drop(TestTable::create_table(dir.path(), &b"value\n"[..], Timestamp::UNIX_EPOCH).expect("creating the replacement table"));
 
         assert_eq!(
             fs::metadata(path).expect("reading replacement metadata").len(),
@@ -748,7 +747,7 @@ mod tests {
     #[test]
     fn creating_a_table_writes_exact_count_timestamp_and_zero_padding() {
         let dir = TempDir::new().expect("creating a temporary directory");
-        let now = Utc.with_ymd_and_hms(2026, 9, 28, 12, 34, 56).unwrap();
+        let now: Timestamp = "2026-09-28T12:34:56Z".parse().expect("valid timestamp literal");
 
         drop(TestTable::create_table(dir.path(), &b"value\nhello\n"[..], now).expect("creating the table"));
         let bytes = fs::read(dir.path().join(TestTable::TABLE_NAME)).expect("reading the table");
@@ -756,7 +755,7 @@ mod tests {
         assert_eq!(u64::from_le_bytes(bytes[8..16].try_into().unwrap()), 1);
         assert_eq!(
             u64::from_le_bytes(bytes[16..24].try_into().unwrap()),
-            now.timestamp().cast_unsigned()
+            now.as_second().cast_unsigned()
         );
         assert_eq!(&bytes[bytes.len() - 10..], &[0; 10]);
     }
@@ -764,7 +763,7 @@ mod tests {
     #[test]
     fn creating_a_table_clamps_pre_epoch_timestamps_to_zero() {
         let dir = TempDir::new().expect("creating a temporary directory");
-        let before_epoch = Utc.timestamp_opt(-1, 0).unwrap();
+        let before_epoch = Timestamp::from_second(-1).expect("negative one second is representable");
 
         drop(TestTable::create_table(dir.path(), &b"value\n"[..], before_epoch).expect("creating the table"));
         let bytes = fs::read(dir.path().join(TestTable::TABLE_NAME)).expect("reading the table");
@@ -776,23 +775,23 @@ mod tests {
     fn table_creation_returns_csv_and_row_conversion_errors() {
         let dir = TempDir::new().expect("creating a temporary directory");
 
-        let error = TestTable::create_table(dir.path(), &b"value\n\xFF\n"[..], DateTime::UNIX_EPOCH)
+        let error = TestTable::create_table(dir.path(), &b"value\n\xFF\n"[..], Timestamp::UNIX_EPOCH)
             .expect_err("invalid UTF-8 in the header must be rejected");
         assert!(format!("{error:#}").contains("reading CSV"));
 
         let error = write_table_contents::<TestTable>(
             &mut Cursor::new(Vec::new()),
             HeaderThenError { header_sent: false },
-            DateTime::UNIX_EPOCH,
+            Timestamp::UNIX_EPOCH,
         )
         .expect_err("reader failures after the header must be returned");
         assert!(format!("{error:#}").contains("reading CSV row"));
 
-        let error = write_table_contents::<TestTable>(&mut Cursor::new(Vec::new()), &b"other\nvalue\n"[..], DateTime::UNIX_EPOCH)
+        let error = write_table_contents::<TestTable>(&mut Cursor::new(Vec::new()), &b"other\nvalue\n"[..], Timestamp::UNIX_EPOCH)
             .expect_err("missing required fields must fail deserialization");
         assert!(format!("{error:#}").contains("deserializing CSV row"));
 
-        let error = TestTable::create_table(dir.path(), &b"value\nreject\n"[..], DateTime::UNIX_EPOCH)
+        let error = TestTable::create_table(dir.path(), &b"value\nreject\n"[..], Timestamp::UNIX_EPOCH)
             .expect_err("row conversion failures must be returned");
         assert!(format!("{error:#}").contains("converting CSV row"));
         assert!(format!("{error:#}").contains("synthetic row conversion failure"));
@@ -823,19 +822,19 @@ mod tests {
 
     #[test]
     fn table_content_writes_return_stage_contexts() {
-        let error = write_table_contents::<TestTable>(&mut FailingIo, &b"value\nhello\n"[..], DateTime::UNIX_EPOCH)
+        let error = write_table_contents::<TestTable>(&mut FailingIo, &b"value\nhello\n"[..], Timestamp::UNIX_EPOCH)
             .expect_err("the initial placeholder write must be propagated by table construction");
         assert!(format!("{error:#}").contains("writing table header placeholder"));
 
-        let error = write_table_contents::<TestTable>(&mut ScriptedIo::fail_write_after(1), &b"value\nhello\n"[..], DateTime::UNIX_EPOCH)
+        let error = write_table_contents::<TestTable>(&mut ScriptedIo::fail_write_after(1), &b"value\nhello\n"[..], Timestamp::UNIX_EPOCH)
             .expect_err("writing the first row must fail");
         assert!(format!("{error:#}").contains("writing table row"));
 
-        let error = write_table_contents::<TestTable>(&mut ScriptedIo::fail_write_after(2), &b"value\nhello\n"[..], DateTime::UNIX_EPOCH)
+        let error = write_table_contents::<TestTable>(&mut ScriptedIo::fail_write_after(2), &b"value\nhello\n"[..], Timestamp::UNIX_EPOCH)
             .expect_err("writing padding must fail");
         assert!(format!("{error:#}").contains("writing table padding"));
 
-        let error = write_table_contents::<TestTable>(&mut ScriptedIo::fail_write_after(3), &b"value\nhello\n"[..], DateTime::UNIX_EPOCH)
+        let error = write_table_contents::<TestTable>(&mut ScriptedIo::fail_write_after(3), &b"value\nhello\n"[..], Timestamp::UNIX_EPOCH)
             .expect_err("finalizing the header must fail");
         assert!(format!("{error:#}").contains("finalizing table header"));
         assert!(format!("{error:#}").contains("writing table magic"));
@@ -852,7 +851,7 @@ mod tests {
 
     #[test]
     fn table_header_and_snapshot_errors_are_propagated_at_the_call_sites() {
-        let error = write_table_contents::<TestTable>(&mut Cursor::new(Vec::new()), &b"\xFF\n"[..], DateTime::UNIX_EPOCH)
+        let error = write_table_contents::<TestTable>(&mut Cursor::new(Vec::new()), &b"\xFF\n"[..], Timestamp::UNIX_EPOCH)
             .expect_err("invalid UTF-8 in the CSV header must be rejected");
         assert!(format!("{error:#}").contains("reading CSV headers"), "{error:#}");
 

@@ -7,9 +7,12 @@
 
 use core::ops::Range;
 
+#[cfg(test)]
 use syn::spanned::Spanned as _;
 use syn::visit::{self, Visit};
 use syn::{Expr, FnArg, Pat, Stmt, Type};
+
+use crate::parse::Extent as _;
 
 pub(in super::super) struct ScalarSources {
     pub(in super::super) locals: Vec<(String, Expr)>,
@@ -25,7 +28,7 @@ struct Shadows<'a> {
 
 impl<'ast> Visit<'ast> for Shadows<'_> {
     fn visit_expr(&mut self, expression: &'ast Expr) {
-        if self.budget == 0 || expression.span().byte_range().start > self.target {
+        if self.budget == 0 || expression.extent().byte_range().start > self.target {
             return;
         }
         self.budget -= 1;
@@ -33,7 +36,7 @@ impl<'ast> Visit<'ast> for Shadows<'_> {
     }
 
     fn visit_block(&mut self, block: &'ast syn::Block) {
-        if block.span().byte_range().contains(&self.target) {
+        if block.extent().byte_range().contains(&self.target) {
             visit::visit_block(self, block);
         }
     }
@@ -41,7 +44,7 @@ impl<'ast> Visit<'ast> for Shadows<'_> {
     fn visit_pat_ident(&mut self, pattern: &'ast syn::PatIdent) {
         if
         // #[gamma::skip(relational.gt_to_ge, reason = "A binding pattern begins strictly before or after the target While token, never at it.", tag = "equivalent")]
-        pattern.span().byte_range().start > self.target {
+        pattern.extent().byte_range().start > self.target {
             return;
         }
         self.locals.retain(|(name, _)| name != &pattern.ident.to_string());
@@ -59,26 +62,24 @@ impl<'ast> Visit<'ast> for Shadows<'_> {
 
 pub(in super::super) fn scalar_sources(file: &syn::File, target: &Range<usize>) -> Option<ScalarSources> {
     if file.items.len() > 256 {
-        // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
         return None;
     }
     let function = file.items.iter().find_map(|item| match item {
-        syn::Item::Fn(function) if function.block.span().byte_range().contains(&target.start) => Some(function),
+        syn::Item::Fn(function) if function.block.extent().byte_range().contains(&target.start) => Some(function),
         _ => None,
     })?;
     let mut locals = Vec::new();
     let mut nonzero_get = None;
     for (index, statement) in function.block.stmts.iter().take(64).enumerate() {
         if let Stmt::Expr(expression, _) = statement
-            && expression.span().byte_range() == *target
+            && expression.extent().byte_range() == *target
         {
             return Some(ScalarSources { locals, nonzero_get });
         }
-        if statement.span().byte_range().end > target.start {
+        if statement.extent().byte_range().end > target.start {
             if
             // #[gamma::skip(relational.gt_to_ge, reason = "An equal-start direct target statement returned above; other containing statements start strictly earlier.", tag = "equivalent")]
-            statement.span().byte_range().start > target.start {
-                // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
+            statement.extent().byte_range().start > target.start {
                 return None;
             }
             let mut shadows = Shadows {
@@ -89,7 +90,6 @@ pub(in super::super) fn scalar_sources(file: &syn::File, target: &Range<usize>) 
             };
             shadows.visit_stmt(statement);
             if shadows.budget == 0 {
-                // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
                 return None;
             }
             return Some(ScalarSources { locals, nonzero_get });
@@ -115,7 +115,7 @@ pub(in super::super) fn scalar_sources(file: &syn::File, target: &Range<usize>) 
         let Some(init) = local.init.as_ref().filter(|init| init.diverge.is_none()) else {
             continue;
         };
-        if init.expr.span().byte_range().len() > 1024 {
+        if init.expr.extent().byte_range().len() > 1024 {
             continue;
         }
         locals.push((name.clone(), (*init.expr).clone()));

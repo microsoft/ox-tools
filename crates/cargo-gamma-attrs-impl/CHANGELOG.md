@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-11-24
+
+- 🐛 Bug Fixes
+
+  - cargo-gamma: address audit findings ([#381](https://github.com/microsoft/ox-tools/pull/381))
+
 ## [0.6.0] - 2026-11-06
 
 - ✨ Features

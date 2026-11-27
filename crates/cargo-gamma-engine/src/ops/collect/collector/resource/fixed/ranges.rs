@@ -33,7 +33,6 @@ fn unsigned_value(low: u128, high: u128, ty: Primitive, identity: String) -> Opt
         // #[gamma::skip(try.propagate_to_unwrap, reason = "The established named unsigned widths 8, 16, 32, 64, and 128 always have a mask.", tag = "equivalent")]
         ty.mask()?
     {
-        // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
         return None;
     }
     Some(if low == high {
@@ -45,7 +44,6 @@ fn unsigned_value(low: u128, high: u128, ty: Primitive, identity: String) -> Opt
 
 fn finite(low: f64, high: f64, ty: Primitive, identity: String) -> Option<Value> {
     if !low.is_finite() || !high.is_finite() || low < 0.0 || low > high {
-        // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
         return None;
     }
     if low.to_bits() == high.to_bits() {
@@ -56,14 +54,11 @@ fn finite(low: f64, high: f64, ty: Primitive, identity: String) -> Option<Value>
 
 pub(super) fn wrapping(method: &str, left: &Value, right: &Value) -> Option<Value> {
     if matches!(left, Value::Int(..)) {
-        // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
         return None;
     }
     let (low, high, ty) = unsigned(left)?;
-    // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
     let Value::Int(amount, same) = right else { return None };
     if *same != ty {
-        // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
         return None;
     }
     let mask =
@@ -74,7 +69,6 @@ pub(super) fn wrapping(method: &str, left: &Value, right: &Value) -> Option<Valu
         "wrapping_sub" if low >= *amount => (low - amount, high - amount),
         "wrapping_mul" if high.checked_mul(*amount).is_some_and(|product| product <= mask) => (low * amount, high * amount),
         "wrapping_add" | "wrapping_sub" | "wrapping_mul" => (0, mask),
-        // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
         _ => return None,
     };
     unsigned_value(bounds.0, bounds.1, ty, identity(format_args!("{method}({left:?},{right:?})"))?)
@@ -85,24 +79,19 @@ pub(super) fn binary(op: &BinOp, left: &Value, right: &Value) -> Option<Value> {
         && !matches!(left, Value::Int(..))
     {
         let (low, high, ty @ Primitive::Unsigned(width)) = unsigned(left)? else {
-            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
             return None;
         };
-        // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
         let Value::Int(shift, _) = right else { return None };
         if *shift >= u128::from(width) {
-            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
             return None;
         }
         return unsigned_value(low >> shift, high >> shift, ty, identity(format_args!("{left:?}>>{right:?}"))?);
     }
     let (Value::Float(bits, ty), Value::FiniteRange(low, high, other, _)) = (left, right) else {
-        // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
         return None;
     };
     let (value, low, high) = (f64::from_bits(*bits), f64::from_bits(*low), f64::from_bits(*high));
     if ty != other || low <= 0.0 || *ty != Primitive::Float(64) || value < 0.0 {
-        // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
         return None;
     }
     match op {
@@ -119,14 +108,12 @@ pub(super) fn binary(op: &BinOp, left: &Value, right: &Value) -> Option<Value> {
 pub(super) fn cast(value: &Value, target: Primitive) -> Option<Value> {
     let (low, high, _) = unsigned(value)?;
     if target != Primitive::Float(64) {
-        // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
         return None;
     }
     finite(low as f64, high as f64, target, identity(format_args!("{value:?} as f64"))?)
 }
 
 pub(super) fn from(value: Value, target: Primitive) -> Option<Value> {
-    // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
     let Binding::Primitive(source) = value.kind() else { return None };
     let lossless = match (source, target) {
         (Primitive::Unsigned(a), Primitive::Unsigned(b)) | (Primitive::Signed(a), Primitive::Signed(b)) => a <= b,
@@ -145,7 +132,6 @@ pub(super) fn from(value: Value, target: Primitive) -> Option<Value> {
         _ => false,
     };
     if !lossless {
-        // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
         return None;
     }
     if let Value::Symbol(_, _) = value {

@@ -80,12 +80,13 @@ const DOCKERFILE_TOOLS: &str = include_str!("../../../templates/anvil/container/
 const DOCKERFILE_SETUP: &str = include_str!("../../../templates/anvil/container/Dockerfile.setup.region");
 const DOCKERFILE_ENTRY: &str = include_str!("../../../templates/anvil/container/Dockerfile.entry.region");
 
-const RECIPE_PATH: &str = "justfiles/anvil/container.just";
-
 /// The composed Dockerfile the managed regions are spliced into.
 const DOCKERFILE_PATH: &str = ".anvil/container/Dockerfile";
 
 const DOCKERIGNORE_PATH: &str = ".anvil/container/Dockerfile.dockerignore";
+
+/// Repo-root-relative path of the generated container recipes.
+pub(crate) const CONTAINER_JUST_PATH: &str = ".anvil/container.just";
 
 /// The region ids anvil owns inside [`DOCKERFILE_PATH`], in the order a valid
 /// Dockerfile must carry them.
@@ -121,21 +122,25 @@ pub fn composed_host() -> ComposedHost {
 /// The full container artifact group.
 #[must_use]
 pub fn all() -> Vec<Artifact> {
-    vec![
-        recipe(),
+    let mut artifacts = recipes();
+    artifacts.extend([
         dockerignore(),
         dockerfile_base_image(),
         dockerfile_base(),
         dockerfile_tools(),
         dockerfile_setup(),
         dockerfile_entry(),
-    ]
+    ]);
+    artifacts
 }
 
-/// The `anvil-container` recipe and its private helpers.
+/// The container recipe template as one catalog section.
 #[must_use]
-pub fn recipe() -> Artifact {
-    Artifact::owned_file(RECIPE_PATH, RECIPE)
+pub fn recipes() -> Vec<Artifact> {
+    vec![
+        super::justfile::generated_header(CONTAINER_JUST_PATH, "header:container"),
+        super::justfile::template_section(CONTAINER_JUST_PATH, "justfiles/anvil/container.just", RECIPE),
+    ]
 }
 
 fn dockerfile_region(id: &'static str, body: &'static str) -> Artifact {
@@ -267,7 +272,7 @@ mod tests {
             .iter()
             .map(|artifact| match artifact {
                 Artifact::OwnedFile(spec) => spec.path,
-                Artifact::Region(_) => panic!("expected an owned file"),
+                Artifact::OwnedFileSection(_) | Artifact::Region(_) => panic!("expected an owned file"),
             })
             .collect()
     }
@@ -277,60 +282,40 @@ mod tests {
             .iter()
             .filter_map(|artifact| match artifact {
                 Artifact::Region(spec) => Some(spec.id.as_str()),
-                Artifact::OwnedFile(_) => None,
+                Artifact::OwnedFile(_) | Artifact::OwnedFileSection(_) => None,
             })
             .collect()
     }
 
-    /// Every region body, in the order the engine enforces.
-    const REGION_BODIES: [&str; 5] = [
-        DOCKERFILE_BASE_IMAGE,
-        DOCKERFILE_BASE,
-        DOCKERFILE_TOOLS,
-        DOCKERFILE_SETUP,
-        DOCKERFILE_ENTRY,
-    ];
-
-    /// The Dockerfile as a fresh repository first receives it: the seeded
-    /// directive followed by every region body in order.
-    fn composed_dockerfile() -> String {
-        let mut out = DOCKERFILE_HEADER.to_owned();
-        for body in REGION_BODIES {
-            out.push_str(body);
-        }
-        out
-    }
-
     #[test]
-    #[cfg_attr(
-        miri,
-        ignore = "native/cargo-careful retain the generated launcher snapshot; artifact construction and rendering remain interpreted"
-    )]
-    fn container_launcher_recipe_contract() {
-        let (_, launcher) = RECIPE
-            .split_once("anvil-container *command:\n")
-            .expect("the container template declares the launcher recipe");
-        let body = launcher
-            .lines()
-            .take_while(|line| line.is_empty() || line.starts_with("    "))
-            .collect::<Vec<_>>()
-            .join("\n");
-        let snapshot = include_str!("snapshots/cargo_anvil__anvil__artifacts__container__tests__container_launcher_recipe.snap");
-        let (_, expected) = snapshot
-            .split_once("\n---\n")
-            .expect("the checked-in snapshot has a metadata header");
-        assert_eq!(body.trim_end_matches('\n'), expected.trim_end_matches('\n'));
-    }
-
-    #[test]
-    fn group_is_two_owned_files_and_five_dockerfile_regions() {
+    fn group_is_one_owned_file_one_just_section_and_five_dockerfile_regions() {
         let all = all();
         let owned: Vec<_> = all
             .iter()
             .filter(|artifact| matches!(artifact, Artifact::OwnedFile(_)))
             .cloned()
             .collect();
-        assert_eq!(paths(&owned), [RECIPE_PATH, DOCKERIGNORE_PATH]);
+        assert_eq!(paths(&owned), [DOCKERIGNORE_PATH]);
+        let recipe_source = recipes()
+            .into_iter()
+            .find(|artifact| {
+                matches!(
+                    artifact,
+                    Artifact::OwnedFileSection(section)
+                        if section.id == "source:justfiles/anvil/container.just"
+                )
+            })
+            .expect("the container source section must be registered");
+        assert!(
+            matches!(
+                recipe_source,
+                Artifact::OwnedFileSection(section)
+                    if section.path == CONTAINER_JUST_PATH
+                        && section.id == "source:justfiles/anvil/container.just"
+                        && section.body.contains("anvil-container *command:")
+            ),
+            "the container recipe must be a section of the composed Justfile"
+        );
         assert_eq!(region_ids(&all), DOCKERFILE_REGION_ORDER);
     }
 
@@ -344,782 +329,10 @@ mod tests {
         }
     }
 
-    #[test]
-    fn the_syntax_directive_leads_the_seeded_header() {
-        // BuildKit honors the parser directive only when nothing precedes it.
-        // If this ever moves, the frontend pin stops applying and nothing
-        // fails to say so.
-        assert_eq!(
-            DOCKERFILE_HEADER.lines().next(),
-            Some("# syntax=docker/dockerfile:1"),
-            "the parser directive must be the first line of the seeded header"
-        );
-    }
-
-    #[test]
-    fn no_region_body_carries_the_parser_directive() {
-        // Inside a region the directive would sit below an opening sentinel --
-        // a comment -- and be silently demoted. Mentioning it in prose is fine;
-        // what must not appear is a line that *is* the directive.
-        for body in REGION_BODIES {
-            assert!(
-                !body.lines().any(|line| line.starts_with("# syntax=")),
-                "a region body must not carry the parser directive as a line"
-            );
-        }
-    }
-
-    #[test]
-    fn image_installs_the_generated_toolset() {
-        // The image must not carry a second tool list: it installs by running
-        // the same recipe the checks use, from the same generated pins.
-        let composed = composed_dockerfile();
-        assert!(composed.contains("just anvil-setup binstall"));
-        assert!(composed.contains("COPY . ./"));
-        assert!(
-            !composed.contains("COPY rust-toolchain"),
-            "naming the toolchain file would leave a repository without one unable to build"
-        );
-        // The re-entry guard the recipe relies on to avoid nesting.
-        assert!(composed.contains("ENV ANVIL_IN_CONTAINER=1"));
-    }
-
-    #[test]
-    fn the_composed_order_is_a_buildable_dockerfile() {
-        // The region order is not cosmetic: everything depends on FROM, and
-        // the catalog install needs the toolchain that precedes it.
-        let composed = composed_dockerfile();
-        let at = |needle: &str| {
-            composed
-                .find(needle)
-                .unwrap_or_else(|| panic!("missing from composed Dockerfile: {needle}"))
-        };
-        assert!(at("ARG BASE_IMAGE=") < at("FROM ${BASE_IMAGE}"));
-        assert!(at("FROM ${BASE_IMAGE}") < at("RUN apt-get update"));
-        assert!(at("RUN apt-get update") < at("just anvil-setup binstall"));
-        assert!(at("just anvil-setup binstall") < at("WORKDIR /workspace"));
-    }
-
-    #[test]
-    fn the_base_image_is_overridable_without_editing_a_region() {
-        // The whole point of giving the default its own region: a repository
-        // that wants another base re-declares the argument in the gap that
-        // follows, where a later declaration wins, instead of editing anvil's
-        // content and freezing every other pin in the file.
-        assert!(
-            DOCKERFILE_BASE_IMAGE.contains("ARG BASE_IMAGE="),
-            "the default must live in its own region"
-        );
-        assert!(
-            !DOCKERFILE_BASE_IMAGE.contains("FROM "),
-            "FROM must not share the region, or there is no gap to override in"
-        );
-        assert!(
-            DOCKERFILE_BASE.starts_with("FROM ${BASE_IMAGE}"),
-            "the consuming FROM must open the next region: {}",
-            DOCKERFILE_BASE.lines().next().unwrap_or_default()
-        );
-    }
-
-    #[test]
-    fn base_image_is_digest_pinned() {
-        // A floating base tag can change underneath an identity hash that
-        // claims to name fixed content, which would make every cached image a
-        // potential lie.
-        let base = DOCKERFILE_BASE_IMAGE
-            .lines()
-            .find(|line| line.starts_with("ARG BASE_IMAGE="))
-            .expect("the base-image region must declare a default BASE_IMAGE");
-        assert!(base.contains("@sha256:"), "BASE_IMAGE must be digest-pinned: {base}");
-    }
-
-    #[test]
-    fn the_scaffold_carries_no_instruction_that_could_go_stale() {
-        // Anything anvil owns outside a region can never be corrected on a
-        // repository that has already generated the file, because the scaffold
-        // is written once and never reconciled. The parser directive has to pay
-        // that price; nothing that pins or installs anything may join it.
-        let mut lines = DOCKERFILE_HEADER.lines();
-        assert_eq!(
-            lines.next(),
-            Some("# syntax=docker/dockerfile:1"),
-            "the parser directive must lead the scaffold"
-        );
-        assert!(
-            lines.all(|line| line.is_empty() || line.starts_with('#')),
-            "the scaffold must carry no build instruction: {DOCKERFILE_HEADER}"
-        );
-    }
-
-    #[test]
-    fn build_context_admits_only_what_the_image_copies() {
-        assert!(DOCKERIGNORE.contains("!justfiles"));
-        assert!(DOCKERIGNORE.contains("!Cargo.toml"));
-        assert!(DOCKERIGNORE.contains("!rust-toolchain.toml"));
-        assert!(DOCKERIGNORE.contains("!rust-toolchain\n"));
-    }
-
-    #[cfg_attr(
-        miri,
-        ignore = "native and cargo-careful retain generated-container recipe text contracts; focused recipe tests preserve Miri coverage"
-    )]
-    #[test]
-    fn recipe_has_no_generation_time_placeholders() {
-        // The credential-name marker is replaced by the launcher at runtime,
-        // not by the generator.
-        let without_runtime_marker = RECIPE.replace("__CREDENTIAL_NAMES__", "");
-        assert!(
-            !without_runtime_marker.contains("__"),
-            "the recipe must not carry generation-time placeholders"
-        );
-        assert!(!RECIPE.contains("anvil.toml"));
-    }
-
-    #[cfg_attr(
-        miri,
-        ignore = "native and cargo-careful retain generated-container recipe text contracts; focused recipe tests preserve Miri coverage"
-    )]
-    #[test]
-    fn recipe_exposes_the_documented_surface() {
-        for expected in [
-            "anvil-container *command:",
-            "anvil-container-tag:",
-            "anvil-container-status:",
-            "anvil-container-down:",
-        ] {
-            assert!(RECIPE.contains(expected), "missing recipe: {expected}");
-        }
-        // A cache-defeating rebuild is `ANVIL_CONTAINER_NO_CACHE=1`, which is
-        // already public and composes with the other guards. A recipe wrapping
-        // one variable assignment would be a second way to say the same thing.
-        assert!(!RECIPE.contains("anvil-container-rebuild:"));
-    }
-
-    #[cfg_attr(
-        miri,
-        ignore = "native and cargo-careful retain generated-container recipe text contracts; focused recipe tests preserve Miri coverage"
-    )]
-    #[test]
-    fn every_public_recipe_lists_with_a_whole_sentence() {
-        // `just --list` takes the last comment line before the attributes as
-        // the description, so a recipe whose rationale paragraph ends mid
-        // sentence lists as a fragment -- "# toolchain that would otherwise
-        // mask the image's own." The generated tree is the discovery surface,
-        // so each public recipe repeats a one-line summary immediately above
-        // its attributes.
-        for recipe in [
-            "anvil-container *command:",
-            "anvil-container-tag:",
-            "anvil-container-status:",
-            "anvil-container-down:",
-        ] {
-            let at = RECIPE.find(recipe).expect("recipe must exist");
-            let description = RECIPE[..at]
-                .lines()
-                .rev()
-                .find(|line| line.trim_start().starts_with('#'))
-                .expect("a public recipe must carry a description")
-                .trim_start()
-                .trim_start_matches('#')
-                .trim();
-            assert!(
-                description.ends_with('.') && description.starts_with(|c: char| c.is_uppercase()),
-                "{recipe} lists as a fragment: {description:?}"
-            );
-        }
-    }
-
-    #[test]
     #[cfg_attr(
         miri,
         ignore = "native/cargo-careful retain generated-recipe text contracts; artifact construction and rendering remain interpreted"
     )]
-    fn the_tag_is_computed_in_exactly_one_place() {
-        // `anvil-container-tag` is public so a publisher can name the image it
-        // is about to build. That only holds while it is the same computation
-        // the consumer performs: a second copy of the hash would let the two
-        // drift and turn a published tag into a claim nobody checks.
-        assert_eq!(
-            RECIPE.matches("TransformFinalBlock").count(),
-            1,
-            "the content hash must be computed once, by anvil-container-tag"
-        );
-        // Bytes, not decoded text: ReadAllText replaces every invalid sequence
-        // with U+FFFD, so two files differing only in invalid bytes would hash
-        // alike while COPY put their real bytes in the image.
-        assert!(RECIPE.contains("[System.IO.File]::ReadAllBytes($path)"));
-        assert!(
-            RECIPE.contains("$image = & '{{ replace(just_executable(), \"'\", \"''\") }}' anvil-container-tag"),
-            "the resolver must ask anvil-container-tag rather than recompute"
-        );
-    }
-
-    #[cfg_attr(
-        miri,
-        ignore = "native and cargo-careful retain generated-container recipe text contracts; focused recipe tests preserve Miri coverage"
-    )]
-    #[test]
-    fn resolution_is_attempted_before_building_and_never_fatal() {
-        // Order: local image, then the hook, then a build. Resolving sits
-        // inside the cache guard (NO_CACHE must defeat a remote cache too) and
-        // before the NO_REBUILD guard, because fetching is not building.
-        let inspect = RECIPE.find("image inspect $image").expect("the local check must exist");
-        let resolve = RECIPE
-            .find("Anvil-ResolveImage $image @resolveArgs")
-            .expect("the resolve call must exist");
-        let build = RECIPE.find("anvil: building $image").expect("the build must exist");
-        assert!(
-            inspect < resolve && resolve < build,
-            "resolve belongs between the local check and the build"
-        );
-
-        let no_rebuild = RECIPE
-            .find("if ($env:ANVIL_CONTAINER_NO_REBUILD -eq '1') {")
-            .expect("the no-rebuild guard must exist");
-        assert!(resolve < no_rebuild, "resolving is not building, so NO_REBUILD must not block it");
-
-        // A publisher that has not caught up must not stop the developer who
-        // made the change, so every failure falls through to a build --
-        // including a hook that cannot even be loaded, which is why the
-        // dot-source is inside the try rather than ahead of it.
-        let try_start = RECIPE[..resolve].rfind("try {").expect("the resolve call must sit inside a try");
-        let load = RECIPE[..resolve]
-            .rfind(". $hookPath")
-            .expect("the hook must be loaded before it is called");
-        assert!(try_start < load, "loading a broken hook must not escape the catch");
-        assert!(RECIPE.contains("anvil: $hookRel failed:"));
-        assert!(RECIPE.contains("anvil: nothing resolved; building locally"));
-    }
-
-    #[test]
-    fn a_resolved_reference_is_checked_for_presence_before_it_is_used() {
-        // Presence, not verification: `image inspect` proves something carries
-        // that reference, not that its contents match the digest the tag
-        // claims. Trusting the hook is the contract; this only keeps a
-        // reference the hook never fetched from failing later, under
-        // `--pull=never`, a long way from the cause.
-        let resolve = RECIPE
-            .find("Anvil-ResolveImage $image @resolveArgs")
-            .expect("the resolve call must exist");
-        let verify = RECIPE[resolve..]
-            .find("image inspect $resolved")
-            .expect("a resolved reference must be inspected before use");
-        let accept = RECIPE[resolve..]
-            .find("Write-Output $resolved")
-            .expect("a resolved reference must be returned");
-        assert!(verify < accept, "check the resolved reference before returning it");
-    }
-
-    #[test]
-    #[cfg_attr(
-        miri,
-        ignore = "native/cargo-careful retain generated-recipe text contracts; artifact construction and rendering remain interpreted"
-    )]
-    fn resolver_context_is_optional_and_uses_the_selected_engine() {
-        assert!(RECIPE.contains("$resolveArgs = @{}"));
-        assert!(RECIPE.contains("if ($parameters.ContainsKey('Engine') -and $parameters.ContainsKey('EnginePrefix'))"));
-        assert!(RECIPE.contains("$resolveArgs = @{ Engine = $engineExe; EnginePrefix = $enginePrefix }"));
-        assert!(RECIPE.contains("Anvil-ResolveImage $image @resolveArgs"));
-    }
-
-    #[test]
-    fn a_query_never_pulls() {
-        // Resolving can mean pulling gigabytes; `anvil-container-status` asks
-        // about this machine and must not reach a registry to answer.
-        assert!(RECIPE.contains("$env:ANVIL_CONTAINER_NO_RESOLVE = '1'"));
-        assert!(RECIPE.contains("$env:ANVIL_CONTAINER_NO_RESOLVE -ne '1'"));
-    }
-
-    #[cfg_attr(
-        miri,
-        ignore = "native and cargo-careful retain generated-container recipe text contracts; focused recipe tests preserve Miri coverage"
-    )]
-    #[test]
-    fn every_interpolation_into_powershell_is_escaped() {
-        // A `just` value pasted raw into a '…' literal ends the string on an
-        // apostrophe: a repository path containing one breaks every recipe
-        // here, and `target` would let the remainder run as host PowerShell.
-        // The deleted runner.just escaped every interpolation; this guards
-        // against losing that again.
-        //
-        // Every `{{` is visited, not just those preceded by an apostrophe,
-        // because the defect found in review was the other case: an
-        // interpolation escaped with `replace(…, "'", "''")` -- correct for a
-        // '…' literal -- that landed inside a "…" literal, where the doubling
-        // renders as a literal '' and `$` stays live. Scanning only for `'{{`
-        // cannot see that site at all, since it does not begin with a quote.
-        //
-        // Two variables are exempt and checked explicitly below: the image name
-        // is regex-sanitized at definition, and the workdir is a literal.
-        const EXEMPT: [&str; 2] = ["{{anvil_container_name}}", "{{anvil_container_workdir}}"];
-        for (index, _) in RECIPE.match_indices("{{") {
-            let tail = &RECIPE[index..];
-            if EXEMPT.iter().any(|exempt| tail.starts_with(exempt)) {
-                continue;
-            }
-            // The quote this interpolation is being pasted into, if any.
-            let quote = RECIPE[..index].chars().next_back();
-            let escaped = tail.starts_with("{{ replace(");
-            match quote {
-                // A single-quoted literal needs just's doubling form.
-                Some('\'') => assert!(
-                    escaped,
-                    "unescaped interpolation into a PowerShell literal at byte {index}: {}",
-                    &tail[..tail.len().min(60)]
-                ),
-                // A double-quoted literal is the reviewed hazard: `''` doubling
-                // does not escape there and `$` keeps expanding, so only an
-                // exempt name is safe. Interpolating anything else needs a
-                // single-quoted literal instead.
-                Some('"') => panic!(
-                    "interpolation into a double-quoted PowerShell literal at byte {index}: {}",
-                    &tail[..tail.len().min(60)]
-                ),
-                _ => {}
-            }
-        }
-        // And the escaping that is present uses just's own doubling form.
-        assert!(RECIPE.contains(r#"replace(justfile_directory(), "'", "''")"#));
-        assert!(RECIPE.contains(r#"replace(invocation_directory_native(), "'", "''")"#));
-        assert!(RECIPE.contains(r#"replace(command, "'", "''")"#));
-    }
-
-    #[test]
-    fn the_image_name_cannot_carry_an_apostrophe() {
-        // What makes the exemption above safe: the character class admits
-        // only alphanumerics, so no quote can reach a PowerShell literal.
-        assert!(RECIPE.contains(r#"replace_regex(lowercase(file_name(justfile_directory())), '[^a-z0-9]+', "-")"#));
-    }
-
-    #[cfg_attr(
-        miri,
-        ignore = "native and cargo-careful retain generated-container recipe text contracts; focused recipe tests preserve Miri coverage"
-    )]
-    #[test]
-    fn an_argument_survives_as_its_own_word() {
-        // `*command` joins with spaces, so passing it through as one string
-        // would run a single argument containing them all.
-        assert!(RECIPE.contains(r"-split '\s+'"));
-        // The argv is the command. Prefixing it would confine the recipe to
-        // `just` and make every other program unreachable.
-        assert!(RECIPE.contains("$runArgs += $argv"));
-        assert!(!RECIPE.contains("@('just') + $argv"));
-    }
-
-    #[test]
-    fn a_nested_just_resolves_to_the_launching_binary() {
-        // ANVIL_IN_CONTAINER is a documented control a developer can set on a
-        // host, where a bare name resolves against PATH rather than the `just`
-        // that is running.
-        assert!(RECIPE.contains(r#"if ($argv[0] -eq 'just') { '{{ replace(just_executable(), "'", "''") }}' } else { $argv[0] }"#));
-    }
-
-    #[test]
-    fn podman_is_pointed_at_the_ignore_file() {
-        // BuildKit finds `<dockerfile>.dockerignore` itself; buildah reads only
-        // a context-root file, so without this the whole worktree is the build
-        // context.
-        assert!(RECIPE.contains(r"if ($engineCmd[-1] -eq 'podman') { $buildCmd += @('--ignorefile'"));
-    }
-
-    #[test]
-    fn no_rebuild_is_honoured_even_with_no_cache_set() {
-        // The two controls compose: NO_REBUILD must not be skipped just
-        // because NO_CACHE is exported, or `anvil-container-status` spends
-        // minutes building from a query.
-        let no_cache = RECIPE
-            .find("if ($env:ANVIL_CONTAINER_NO_CACHE -ne '1') {")
-            .expect("the cache guard must exist");
-        let no_rebuild = RECIPE
-            .find("if ($env:ANVIL_CONTAINER_NO_REBUILD -eq '1') {")
-            .expect("the no-rebuild guard must exist");
-        let guard_end = RECIPE[no_cache..].find("\n    }\n").expect("the cache guard must be closed") + no_cache;
-        assert!(no_rebuild > guard_end, "the NO_REBUILD check must sit outside the NO_CACHE guard");
-    }
-
-    #[test]
-    fn engine_is_an_environment_variable_with_a_docker_default() {
-        assert!(RECIPE.contains(r#"env_var_or_default("ANVIL_CONTAINER_ENGINE", "docker")"#));
-        assert!(RECIPE.contains(r#"replace(anvil_container_engine, "'", "''")"#));
-    }
-
-    #[test]
-    #[cfg_attr(
-        miri,
-        ignore = "native/cargo-careful retain generated-recipe text contracts; artifact construction and rendering remain interpreted"
-    )]
-    fn hook_file_is_an_image_input_but_hook_output_is_not() {
-        // A changed hook must rename the tag; a minted credential must not. The
-        // hook is picked up by the walk of `.anvil/container/`, which is what
-        // also catches a file a repository `COPY`s from one of the Dockerfile's
-        // user gaps.
-        assert!(RECIPE.contains("$containerRoot = Join-Path $repoRoot '.anvil/container'"));
-        assert!(RECIPE.contains("id=$id,env=$name"));
-    }
-
-    #[test]
-    fn every_file_under_the_container_directory_is_an_image_input() {
-        // The Dockerfile is composed: a repository adds `COPY` lines in the
-        // gaps between anvil's regions, naming files anvil never hears about.
-        // Hashing a fixed list would let those change the image under a
-        // reference that already resolves.
-        let walk = RECIPE
-            .find("$containerRoot = Join-Path $repoRoot '.anvil/container'")
-            .expect("the tag must walk the container directory");
-        assert!(
-            RECIPE[walk..].contains("Get-ChildItem -LiteralPath $containerRoot -Recurse -Force"),
-            "the walk must be recursive and include hidden entries"
-        );
-        // A missing Dockerfile must still be fatal: the walk alone would let
-        // it contribute nothing and yield a confident tag for an unbuildable
-        // image. The resolver asserts existence, and the tag resolves the path
-        // through it before walking.
-        // Searched over the whole recipe, not a prefix: `rfind` on `RECIPE[..walk]`
-        // can only return an index below `walk`, so comparing them would assert
-        // nothing and would keep passing if the ordering were removed.
-        let resolve = RECIPE
-            .find("_anvil-container-dockerfile\n")
-            .expect("the tag must resolve the Dockerfile before hashing the directory");
-        assert!(resolve < walk, "the Dockerfile must be resolved before the walk hashes it");
-        assert!(RECIPE.contains("anvil: container image input is missing: .anvil/container/Dockerfile"));
-    }
-
-    #[cfg_attr(
-        miri,
-        ignore = "native and cargo-careful retain generated-container recipe text contracts; focused recipe tests preserve Miri coverage"
-    )]
-    #[test]
-    fn hook_values_are_passed_by_name_never_by_value() {
-        // NAME=VALUE on a command line is recorded by endpoint telemetry and
-        // retained far longer than a short-lived token is meant to live.
-        assert!(RECIPE.contains("$runArgs += @('-e', $name)"));
-        assert!(RECIPE.contains("foreach ($name in $prepareVars.Keys) { $prepareArgs += @('-e', $name) }"));
-        let without_empty_loader_controls = RECIPE.replace("$prepareArgs += @('-e', \"$name=\", '-e', \"CARGO_ENV_$name=\")", "");
-        assert!(!without_empty_loader_controls.contains("-e', \"$name="));
-    }
-
-    #[test]
-    #[cfg_attr(
-        miri,
-        ignore = "native/cargo-careful retain generated-recipe text contracts; artifact construction and rendering remain interpreted"
-    )]
-    fn empty_hook_values_fail_closed() {
-        // Both phases, asserted independently: "for" alone is a substring of
-        // the build-side message, so it would pass with the run-side guard
-        // deleted.
-        assert!(RECIPE.contains("Anvil-BuildSecrets returned an empty value for secret"));
-        assert!(RECIPE.contains("Anvil-RunEnv returned an empty value for"));
-    }
-
-    #[cfg_attr(
-        miri,
-        ignore = "native and cargo-careful retain generated-container recipe text contracts; focused recipe tests preserve Miri coverage"
-    )]
-    #[test]
-    fn cache_volumes_never_mask_the_images_tools() {
-        // An engine seeds a named volume from the image only on first
-        // creation, so mounting a directory that holds installed binaries
-        // pins the first image's tools over every later tag.
-        assert!(RECIPE.contains("\"${registryVolume}:/usr/local/cargo/registry\""));
-        assert!(RECIPE.contains("\"${gitVolume}:/usr/local/cargo/git\""));
-        assert!(!RECIPE.contains("-cargo:/usr/local/cargo'"));
-        assert!(!RECIPE.contains(":/usr/local/rustup"));
-    }
-
-    #[test]
-    #[cfg_attr(
-        miri,
-        ignore = "native/cargo-careful retain generated-recipe text contracts; artifact construction and rendering remain interpreted"
-    )]
-    fn wsl_calls_bypass_the_login_shell() {
-        // `wsl.exe -- <cmd>` re-parses the command line through the default
-        // shell: a path holding `$` is silently truncated (and wslpath still
-        // exits 0), and a `;` in any forwarded argument runs on the host.
-        // Matched on the invocation form so the comment explaining this may
-        // still name the broken spelling.
-        assert!(!RECIPE.contains("& wsl.exe -- "));
-        assert!(!RECIPE.contains("wsl.exe|--|"));
-        assert!(RECIPE.contains("& wsl.exe --exec "));
-        assert!(RECIPE.contains("wsl.exe|--exec|"));
-    }
-
-    #[test]
-    fn container_name_is_always_a_valid_reference() {
-        // A repository name may not end in a separator or repeat `.`/`_`, so
-        // a directory like `ox-tools (copy)` must not reach the engine as
-        // `anvil-ox-tools--copy-`.
-        assert!(RECIPE.contains(r#"replace_regex(lowercase(file_name(justfile_directory())), '[^a-z0-9]+', "-")"#));
-        assert!(RECIPE.contains(r#"trim_end_matches("anvil-" + replace_regex"#));
-    }
-
-    #[test]
-    #[cfg_attr(
-        miri,
-        ignore = "native/cargo-careful retain generated-recipe text contracts; artifact construction and rendering remain interpreted"
-    )]
-    fn teardown_reports_a_removal_that_failed() {
-        // $ErrorActionPreference does not cover native commands, and this is
-        // the only way to clear a cache volume.
-        assert!(RECIPE.contains("if ($LASTEXITCODE -ne 0) { $failed += $vol }"));
-        assert!(RECIPE.contains("anvil: could not remove: "));
-    }
-
-    #[test]
-    #[cfg_attr(
-        miri,
-        ignore = "native/cargo-careful retain generated-recipe text contracts; artifact construction and rendering remain interpreted"
-    )]
-    fn a_mapped_user_gets_a_writable_home() {
-        // A uid with no passwd entry is given HOME=/, which is not writable.
-        assert!(RECIPE.contains("$runArgs += @('--user', \"${hostUid}:${hostGid}\")"));
-        assert!(RECIPE.contains("$runArgs += @('-e', 'HOME=/tmp')"));
-    }
-
-    #[cfg_attr(
-        miri,
-        ignore = "native and cargo-careful retain generated-container recipe text contracts; focused recipe tests preserve Miri coverage"
-    )]
-    #[test]
-    fn the_whole_recipe_tree_defines_the_image() {
-        // `just anvil-setup` reaches the install recipes through the tier,
-        // group and check recipes, so the routing decides *whether* a tool is
-        // installed as surely as tools.just decides *how*. Hashing only the
-        // install definitions would let a group drop a `-setup` dependency,
-        // changing the installed set, without renaming the image.
-        // Every file, not only `*.just`: the build context admits the whole
-        // directory, so a non-recipe file an adopter adds by hand is copied
-        // into the image. Filtering here would let it change the image's
-        // contents without changing its tag. -Force because a dot-prefixed
-        // file is copied like any other and would otherwise be skipped.
-        // Directories are enumerated too, because `-File` hides a link to one
-        // and a link is refused rather than digested.
-        assert!(RECIPE.contains("-Recurse -Force"));
-        assert!(!RECIPE.contains("-Recurse -Force -Filter '*.just'"));
-        assert!(
-            !RECIPE.contains("-Recurse -File -Force"),
-            "a link to a directory is invisible to a file-only walk"
-        );
-        // ComputeHash, not the static HashData: the latter needs .NET 5, and
-        // the prerequisite check accepts PowerShell 7.0 on .NET Core 3.1.
-        assert!(!RECIPE.contains("SHA256]::HashData"));
-        assert!(RECIPE.contains("SHA256]::Create()"));
-        // Including this driver, which passes the build arguments, the secret
-        // mounts and the hook's PreBuild output into the build.
-        assert!(!RECIPE.contains("-cne 'justfiles/anvil/container.just'"));
-    }
-
-    #[cfg_attr(
-        miri,
-        ignore = "native and cargo-careful retain generated-container recipe text contracts; focused recipe tests preserve Miri coverage"
-    )]
-    #[test]
-    fn the_recipe_contract_inputs_cross_the_boundary() {
-        // A check that reads one of these natively must read the same value in
-        // a container, or the same command means two different things.
-        // anvil-pr-title is the sharp case: with PR_TITLE unset it exits 0 with
-        // a skip notice, so a title a native run rejects would pass in a
-        // container and the tier would still report green.
-        for name in [
-            "PR_TITLE",
-            "BASE_REF",
-            "GITHUB_BASE_REF",
-            "SYSTEM_PULLREQUEST_TARGETBRANCH",
-            "ANVIL_IMPACT",
-            "ANVIL_MIRI_JOBS",
-        ] {
-            assert!(RECIPE.contains(name), "{name} must be forwarded");
-        }
-        // ANVIL_IMPACT decides whether scoping is computed, consumed from a
-        // downloaded cache, or skipped. A CI group job exports `consume`, and a
-        // container that did not inherit it would recompute from a diff instead
-        // of trusting the artifact the group downloaded.
-        assert!(
-            RECIPE.contains("'ANVIL_IMPACT', 'ANVIL_MIRI_JOBS')) {"),
-            "ANVIL_IMPACT and ANVIL_MIRI_JOBS must be in the forwarded set, not merely mentioned"
-        );
-        // ANVIL_IMPACT_INPUT_DIR is the deliberate exception: it names a HOST
-        // directory that need not exist inside the container, so `-e` cannot
-        // carry it correctly. Forwarding it would be wrong and dropping it
-        // silently would let the container fall back to target/anvil/impact and
-        // scope off a different package list while still reporting green, so
-        // the boundary rejects the combination instead.
-        assert!(
-            !RECIPE.contains("'ANVIL_IMPACT_INPUT_DIR')") && !RECIPE.contains("'ANVIL_IMPACT_INPUT_DIR',"),
-            "ANVIL_IMPACT_INPUT_DIR must not be forwarded: it is a host path"
-        );
-        assert!(
-            RECIPE.contains("Env:ANVIL_IMPACT_INPUT_DIR") && RECIPE.contains("containerized checks cannot honor the override"),
-            "a containerized run with ANVIL_IMPACT_INPUT_DIR set must be rejected, not silently fall back"
-        );
-        // ...but only under consume, the one mode that reads it. With impact off
-        // or unset the override is ignored, so a container cannot diverge and
-        // rejecting would block a run that is perfectly well defined.
-        assert!(
-            RECIPE.contains("$env:ANVIL_IMPACT -eq 'consume' -and (Test-Path -LiteralPath 'Env:ANVIL_IMPACT_INPUT_DIR')"),
-            "the rejection must be gated on consume mode"
-        );
-        // Nothing reads these; forwarding them only implied a contract that
-        // does not exist. See justfile.rs, which asserts they stay removed.
-        assert!(
-            !RECIPE.contains("ANVIL_INCLUDE_"),
-            "the ANVIL_INCLUDE_* variables were removed and must not be forwarded"
-        );
-    }
-
-    #[cfg_attr(
-        miri,
-        ignore = "native and cargo-careful retain generated-container recipe text contracts; focused recipe tests preserve Miri coverage"
-    )]
-    #[test]
-    fn an_untracked_input_is_framed_from_the_filesystem() {
-        // git has no record of an untracked file and `diff --raw` does not
-        // report one, so the filesystem is the only thing that can answer for
-        // its mode. Framing a fixed value would let `chmod +x` change the image
-        // without changing the tag, and the tag controls reuse inside this
-        // checkout even though untracked content has no published identity.
-        // `test -x`, not `FileInfo.UnixMode`: that property needs an
-        // experimental feature and is absent on PowerShell 7.0, the floor this
-        // recipe supports, where it would silently frame every untracked
-        // executable as an ordinary file.
-        assert!(RECIPE.contains("& /usr/bin/env test -x $path"));
-        assert!(!RECIPE.contains("(Get-Item -LiteralPath $path -Force).UnixMode"));
-        // Tracked files must NOT be read this way: Windows has no executable
-        // bit, so two checkouts of one commit would disagree on the tag.
-        assert!(RECIPE.contains("if ($indexMode.ContainsKey($rel)) {"));
-    }
-
-    #[cfg_attr(
-        miri,
-        ignore = "native and cargo-careful retain generated-container recipe text contracts; focused recipe tests preserve Miri coverage"
-    )]
-    #[test]
-    fn the_credential_phases_are_fail_closed() {
-        // Unlike resolution, these must stop the run: a container that starts
-        // without its credentials fails deep inside, far from the cause.
-        assert!(RECIPE.contains("anvil: Anvil-BuildSecrets returned no secrets"));
-        assert!(RECIPE.contains("anvil: Anvil-RunEnv returned no variables"));
-        assert!(RECIPE.contains("anvil: failed to load ${hookRel}:"));
-        // Whitespace is not a credential. IsNullOrEmpty would accept " ".
-        assert!(!RECIPE.contains("[string]::IsNullOrEmpty($hook"));
-        // Take the last object, not the whole stream: a hook that writes
-        // progress with Write-Output would otherwise hand back an array whose
-        // .Secrets is silently $null, and the guard above would not fire.
-        assert!(RECIPE.contains("@(Anvil-BuildSecrets | Where-Object { $_ }) | Select-Object -Last 1"));
-        assert!(RECIPE.contains("@(Anvil-RunEnv | Where-Object { $_ }) | Select-Object -Last 1"));
-    }
-
-    #[cfg_attr(
-        miri,
-        ignore = "native and cargo-careful retain generated-container recipe text contracts; focused recipe tests preserve Miri coverage"
-    )]
-    #[test]
-    fn the_working_directory_is_mapped_from_a_native_path() {
-        // `invocation_directory()` reports a Cygwin-style path when cygpath is
-        // on PATH, which shares no prefix with the native justfile_directory()
-        // it is made relative to -- so the run would be placed outside the
-        // mount, on a path that does not exist in the container.
-        assert!(RECIPE.contains("invocation_directory_native()"));
-        assert!(!RECIPE.contains("replace(invocation_directory(), "));
-        // -eq '..' or a ../ prefix, never a bare .. prefix: a repository
-        // directory named ..data is inside the root and must not be refused.
-        assert!(RECIPE.contains("$rel -eq '..' -or $rel.StartsWith('../')"));
-        assert!(!RECIPE.contains("if ($rel.StartsWith('..')) {"));
-    }
-
-    #[test]
-    fn teardown_removes_only_volumes_the_run_creates() {
-        // Naming a volume the run never mounts is a claim that it exists.
-        let down = RECIPE.find("anvil-container-down:").expect("the teardown recipe must exist");
-        for stale in ["-cargo'", "-rustup'"] {
-            assert!(
-                !RECIPE[down..].contains(stale),
-                "{stale} is never created, so it cannot be torn down"
-            );
-        }
-        assert!(RECIPE[down..].contains("-cargo-registry'"));
-        assert!(RECIPE[down..].contains("-cargo-git'"));
-    }
-
-    #[test]
-    fn the_build_context_stays_scoped_to_the_recipe_tree() {
-        // The whole tree is copied because `just` must parse it, but nothing
-        // outside it is: an unscoped context streams every stale `target/` to
-        // the daemon on each build.
-        assert!(DOCKERIGNORE.contains("justfiles/*\n!justfiles/anvil\n"));
-        assert!(!DOCKERIGNORE.contains("!justfiles\n!rust-toolchain.toml"));
-    }
-
-    #[cfg_attr(
-        miri,
-        ignore = "native and cargo-careful retain generated-container recipe text contracts; focused recipe tests preserve Miri coverage"
-    )]
-    #[test]
-    fn a_redirected_checkout_can_reach_its_git_directory() {
-        // A checkout whose .git is a file names a host path outside the mount,
-        // so without this the container resolves no refs at all and every check
-        // that needs history fails.
-        assert!(RECIPE.contains("git rev-parse --git-common-dir"));
-        assert!(RECIPE.contains("${engineGitCommon}:/anvil/gitdir"));
-        // Redirected through the checkout's own .git file, never through
-        // GIT_DIR/GIT_WORK_TREE: those are ambient, so every process in the
-        // container would inherit them and any git run outside the workspace
-        // -- `git init` in a test's scratch directory, most of all -- would
-        // operate on this repository instead of its own.
-        assert!(RECIPE.contains("gitdir: $containerGitDir"));
-        assert!(RECIPE.contains("{{anvil_container_workdir}}/.git:ro"));
-        assert!(!RECIPE.contains("GIT_DIR="));
-        assert!(!RECIPE.contains("GIT_WORK_TREE="));
-        // The generated file is temporary and must not outlive the run.
-        assert!(RECIPE.contains("if ($gitFile) { Remove-Item -LiteralPath $gitFile"));
-        // An ordinary clone keeps its git directory inside the checkout, where
-        // the bind mount already carries it, and must not take the extra mount.
-        assert!(RECIPE.contains("(Test-Path -LiteralPath (Join-Path $repoRoot '.git') -PathType Leaf)"));
-        // The shape of .git, not whether the git directory differs from the
-        // common one: `--separate-git-dir` redirects without differing, so that
-        // predicate skipped it and left git pointed at a host path.
-        assert!(
-            !RECIPE.contains("if ($gitDirAbs -ne $gitCommonAbs) {"),
-            "a redirect without a separate worktree entry must still be mounted"
-        );
-        // One mount carries both directories, so the git directory has to sit
-        // under the common one. Emitting a path that climbs out of the mount
-        // would fail inside the container, where the cause is invisible.
-        assert!(RECIPE.contains("if ($rel -eq '.') {"));
-        assert!(RECIPE.contains("$rel.StartsWith('../') -or [System.IO.Path]::IsPathRooted($rel)"));
-        // A host with a working engine but no git must not start failing here.
-        assert!(RECIPE.contains("if (Get-Command git -ErrorAction SilentlyContinue) {"));
-    }
-
-    #[test]
-    #[cfg_attr(
-        miri,
-        ignore = "native/cargo-careful retain generated-recipe text contracts; artifact construction and rendering remain interpreted"
-    )]
-    fn the_dockerfile_must_carry_the_canonical_name() {
-        // The engine reads the ignore file as `<dockerfile>.dockerignore` and
-        // anvil maintains it at `.anvil/container/Dockerfile.dockerignore`, so
-        // the two names have to agree and only one of them can move. A variant
-        // is refused, because building from `dockerfile` would find no ignore
-        // file and stream the whole worktree into the build context.
-        assert!(
-            !RECIPE.contains("$dockerfile = '.anvil/container/Dockerfile'"),
-            "the path must come from the recipe that checks it"
-        );
-        assert!(RECIPE.contains("_anvil-container-dockerfile:"));
-        // -ceq, because PowerShell's -eq on strings is case-insensitive and
-        // would make the canonical name indistinguishable from a variant.
-        assert!(RECIPE.contains("$_.Name -ceq 'Dockerfile'"));
-        assert!(RECIPE.contains("must be named exactly '.anvil/container/Dockerfile'"));
-        // The one place that asserts the file exists: the tag's directory walk
-        // cannot, because a missing Dockerfile contributes nothing to the hash
-        // and yields a confident tag for an image that can never be built.
-        assert!(RECIPE.contains("anvil: container image input is missing: .anvil/container/Dockerfile"));
-        // The ignore file is derived from that name, so it lands on the owned
-        // artifact and is normalized as the text it is -- otherwise a CRLF and
-        // an LF checkout of one commit disagree on the tag.
-        assert!(RECIPE.contains(r#"[void]$declaredText.Add("$dockerfile.dockerignore")"#));
-    }
-
     #[test]
     fn hooks_constructor_uses_the_documented_path() {
         assert_eq!(paths(&[hooks("# body\n")]), [HOOKS_PATH]);
@@ -1138,7 +351,7 @@ mod tests {
                 assert_eq!(spec.id.as_str(), "anvil-container-base-image");
                 assert_eq!(spec.host, HostSelector::Path(DOCKERFILE_PATH.to_owned()));
             }
-            Artifact::OwnedFile(_) => panic!("the Dockerfile regions must stay regions"),
+            Artifact::OwnedFile(_) | Artifact::OwnedFileSection(_) => panic!("the Dockerfile regions must stay regions"),
         }
         assert_eq!(replaced.body(), "ARG BASE_IMAGE=example.invalid/base\n");
         assert_eq!(dockerfile_setup().body(), DOCKERFILE_SETUP);

@@ -226,10 +226,17 @@ fn unused_name(line: &str) -> Option<String> {
 ///
 /// Returns an error when cargo cannot be launched, the doctest build fails, or
 /// the capture file cannot be read.
-pub fn gather_package(manifest_path: &Path, package: &str, target_dir: &Path, shim_path: &Path) -> Result<PackageDoctests> {
+pub fn gather_package(
+    manifest_path: &Path,
+    package_spec: &str,
+    capture_name: &str,
+    target_dir: &Path,
+    shim_path: &Path,
+) -> Result<PackageDoctests> {
     gather_package_with(
         manifest_path,
-        package,
+        package_spec,
+        capture_name,
         target_dir,
         shim_path,
         selected_cargo(|key| std::env::var_os(key)),
@@ -245,7 +252,8 @@ pub fn gather_package(manifest_path: &Path, package: &str, target_dir: &Path, sh
 )]
 fn gather_package_with(
     manifest_path: &Path,
-    package: &str,
+    package_spec: &str,
+    capture_name: &str,
     target_dir: &Path,
     shim_path: &Path,
     cargo: OsString,
@@ -255,7 +263,7 @@ fn gather_package_with(
 ) -> Result<PackageDoctests> {
     std::fs::create_dir_all(target_dir).into_app_err(format!("failed to create {}", target_dir.display()))?;
 
-    let capture = target_dir.join(format!("doctests-{package}"));
+    let capture = target_dir.join(format!("doctests-{capture_name}"));
     clear_capture(&capture)?;
     create_capture(&capture, create)?;
     let rustdoc = select_rustdoc()?;
@@ -267,7 +275,7 @@ fn gather_package_with(
         .arg("--manifest-path")
         .arg(manifest_path)
         .arg("--package")
-        .arg(package)
+        .arg(package_spec)
         .arg("--all-features")
         .arg("--target-dir")
         .arg(target_dir)
@@ -280,7 +288,7 @@ fn gather_package_with(
 
     if !output.status.success() {
         ohno::bail!(
-            "`cargo test --doc` failed while collecting doctest evidence for {package}:\n{}",
+            "`cargo test --doc` failed while collecting doctest evidence for {capture_name}:\n{}",
             String::from_utf8_lossy(&output.stderr).trim()
         );
     }
@@ -531,6 +539,7 @@ mod tests {
         let created = std::cell::Cell::new(false);
         let error = gather_package_with(
             Path::new("Cargo.toml"),
+            "[f]ixture",
             "fixture",
             &target,
             Path::new("shim"),
@@ -565,7 +574,8 @@ mod tests {
         let target = directory.path().join("target");
         let error = gather_package_with(
             Path::new("Cargo.toml"),
-            "fixture@1",
+            "[f]ixture",
+            "fixture",
             &target,
             Path::new("shim"),
             "custom-cargo".into(),
@@ -579,7 +589,7 @@ mod tests {
                     "--manifest-path",
                     "Cargo.toml",
                     "--package",
-                    "fixture@1",
+                    "[f]ixture",
                     "--all-features",
                     "--target-dir",
                 ]
@@ -607,7 +617,7 @@ mod tests {
                 );
                 assert_eq!(
                     environment.get(std::ffi::OsStr::new(super::CAPTURE_VAR)),
-                    Some(&Some(target.join("doctests-fixture@1").into_os_string()))
+                    Some(&Some(target.join("doctests-fixture").into_os_string()))
                 );
                 Err(std::io::Error::other("cargo unavailable"))
             },
@@ -621,7 +631,8 @@ mod tests {
         );
         let error = gather_package_with(
             Path::new("Cargo.toml"),
-            "fixture@1",
+            "[f]ixture",
+            "fixture",
             &target,
             Path::new("shim"),
             "cargo".into(),
@@ -635,7 +646,8 @@ mod tests {
         fs::write(&blocked, "").expect("blocking file exists");
         gather_package_with(
             Path::new("Cargo.toml"),
-            "fixture@1",
+            "[f]ixture",
+            "fixture",
             &blocked,
             Path::new("shim"),
             "cargo".into(),
@@ -648,6 +660,7 @@ mod tests {
         fs::write(target.join("doctests-blocked"), "").expect("blocking capture exists");
         gather_package_with(
             Path::new("Cargo.toml"),
+            "[b]locked",
             "blocked",
             &target,
             Path::new("shim"),
@@ -657,6 +670,27 @@ mod tests {
             |_| panic!("must not run Cargo"),
         )
         .expect_err("capture clear failure must propagate");
+    }
+
+    #[test]
+    fn doctest_failure_names_the_package_not_the_cargo_pattern() {
+        let directory = TempDir::new().expect("the test owns its capture output directory");
+        let error = gather_package_with(
+            Path::new("Cargo.toml"),
+            "[f]ixture",
+            "fixture",
+            directory.path(),
+            Path::new("shim"),
+            "cargo".into(),
+            |path| fs::create_dir(path),
+            || Ok("rustdoc".into()),
+            |_| Ok(compiler_output(false, "", "error: doctest compilation failed\n")),
+        )
+        .expect_err("an unsuccessful Cargo exit must propagate");
+        assert_eq!(
+            error.message(),
+            "`cargo test --doc` failed while collecting doctest evidence for fixture:\nerror: doctest compilation failed"
+        );
     }
 
     #[test]

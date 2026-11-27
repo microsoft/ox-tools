@@ -142,6 +142,9 @@ fn filter_then_evaluate_with(
 ) -> Result<Result<ExitCode, AppError>, AppError> {
     // Publication failures return before evaluation; gate failures keep the published reports and raw evidence.
     let paths = publish(execution, collected)?;
+    if execution.args.collect_only {
+        return Ok(Ok(ExitCode::SUCCESS));
+    }
     Ok(evaluate(&paths))
 }
 
@@ -687,7 +690,7 @@ fn plain_configuration_command(
 }
 
 #[derive(Debug)]
-/// Private raw export and public filtered destination for one feature mode.
+/// Private raw export and stable destination for one feature mode.
 struct CollectedReport {
     raw_path: PathBuf,
     stable_path: PathBuf,
@@ -759,16 +762,21 @@ fn filter_and_publish_reports_with_reader(
             diagnostic_path(&report.raw_path)
         ))?;
     }
-    let raw_refs = raw.iter().map(String::as_str).collect::<Vec<_>>();
-    let manifest = execution.workspace.root.join("Cargo.toml");
-    let filtered = filter(&raw_refs, &manifest)?;
+    // Source-ownership evidence can span reports; split collections must defer filtering.
+    let published = if execution.args.collect_only {
+        raw
+    } else {
+        let raw_refs = raw.iter().map(String::as_str).collect::<Vec<_>>();
+        let manifest = execution.workspace.root.join("Cargo.toml");
+        filter(&raw_refs, &manifest)?
+    };
     publish_reports(collected.iter().enumerate().map(|(index, report)| {
-        let contents = filtered
+        let contents = published
             .get(index)
-            .expect("filter_lcov_many preserves one output for every input tracefile");
+            .expect("raw publication and filter_lcov_many preserve one output for every input tracefile");
         (
             report.stable_path.as_path(),
-            format!("{}-filtered.info", report.configuration.artifact_name()),
+            format!("{}-published.info", report.configuration.artifact_name()),
             contents.as_str(),
         )
     }))?;
@@ -810,6 +818,8 @@ fn nextest_command_for_host(execution: &CollectionExecution<'_>, configuration: 
     let target_dir = configuration_target_dir(execution, configuration);
     let mut command = coverage_command(execution.workspace, &target_dir, execution.tools);
     command.args(["llvm-cov", "nextest", "--no-report"]);
+    // Eight LLVM-managed merge slots allow concurrent writers without one raw profile per test process.
+    command.env("LLVM_PROFILE_FILE_NAME", "coverage-%8m.profraw");
     // cargo-llvm-cov's wrapper misses flags inside Cargo's Windows response files.
     if windows_host {
         command.arg("--no-rustc-wrapper");
@@ -1445,6 +1455,153 @@ mod tests {
     const RAW_NO_DEFAULT: &str = "TN:no-default\nSF:fixture.rs\nDA:1,1\nend_of_record\n";
 
     #[test]
+    #[cfg_attr(miri, ignore = "uses temporary directories, which Miri isolation does not support")]
+    fn split_collect_only_reports_match_batch_publication_after_scratch_cleanup() {
+        let raw = [
+            "TN:all-features\nSF:included-test.rs\nDA:4,0\nend_of_record\n",
+            "TN:no-default\nSF:macro-backend.rs\nDA:15,1\nend_of_record\n",
+        ];
+        let mut outputs = Vec::new();
+        for split in [false, true] {
+            let parent = tempdir().expect("owned output directory");
+            let workspace = workspace(parent.path());
+            let selection = Selection {
+                explicit: false,
+                members: workspace.members.clone(),
+            };
+            let args = CollectionArgs {
+                collect_only: true,
+                coverage_dir: parent.path().to_path_buf(),
+                ..collection_args()
+            };
+            let tools = ToolPrograms {
+                cargo: OsString::from("never-invoked"),
+                rustc: OsString::from("never-invoked"),
+            };
+            let collected = [
+                CollectedReport {
+                    raw_path: PathBuf::from("scripted-all.info"),
+                    stable_path: parent.path().join("lcov-all-features.info"),
+                    configuration: FeatureConfiguration::AllFeatures,
+                },
+                CollectedReport {
+                    raw_path: PathBuf::from("scripted-no-default.info"),
+                    stable_path: parent.path().join("lcov-no-default.info"),
+                    configuration: FeatureConfiguration::NoDefaultFeatures,
+                },
+            ];
+            for batch in collected.chunks(if split { 1 } else { 2 }) {
+                let scratch = TemporaryDirectory::create(parent.path()).expect("owned collection scratch");
+                let scratch_path = scratch.path().to_path_buf();
+                let execution = CollectionExecution {
+                    workspace: &workspace,
+                    selection: &selection,
+                    args: &args,
+                    scratch_dir: &scratch_path,
+                    coverage_target_root: &scratch_path,
+                    target: None,
+                    tools: &tools,
+                    quiet: false,
+                };
+                let result = filter_then_evaluate_with(
+                    &execution,
+                    batch,
+                    |execution, batch| {
+                        filter_and_publish_reports_with_reader(
+                            execution,
+                            batch,
+                            |path| match path.to_str() {
+                                Some("scripted-all.info") => Ok(raw[0].to_owned()),
+                                Some("scripted-no-default.info") => Ok(raw[1].to_owned()),
+                                _ => panic!("unexpected raw report: {path:?}"),
+                            },
+                            |_, _| panic!("split collection must preserve raw source-ownership evidence"),
+                        )
+                    },
+                    |_| panic!("collection-only must defer evaluation"),
+                );
+                assert_eq!(
+                    complete_collection(result, scratch).expect("raw publication succeeds"),
+                    ExitCode::SUCCESS
+                );
+                assert!(!scratch_path.exists(), "successful collection must release its build scratch");
+            }
+            outputs.push(
+                collected
+                    .iter()
+                    .map(|report| fs::read_to_string(&report.stable_path).expect("raw report survives scratch cleanup"))
+                    .collect::<Vec<_>>(),
+            );
+        }
+        assert_eq!(outputs[0], raw, "batch publication must retain every counter");
+        assert_eq!(
+            outputs[1], outputs[0],
+            "split collection must preserve the same joint-filter inputs"
+        );
+    }
+
+    #[test]
+    fn collect_only_publishes_before_skipping_the_gate_and_preserves_publication_errors() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let workspace = workspace(root);
+        let selection = Selection {
+            explicit: false,
+            members: workspace.members.clone(),
+        };
+        let tools = ToolPrograms {
+            cargo: OsString::from("never-invoked"),
+            rustc: OsString::from("never-invoked"),
+        };
+        let paths = vec![PathBuf::from("filtered.info")];
+        for collect_only in [false, true] {
+            let args = CollectionArgs {
+                collect_only,
+                ..collection_args()
+            };
+            let execution = CollectionExecution {
+                workspace: &workspace,
+                selection: &selection,
+                args: &args,
+                scratch_dir: root,
+                coverage_target_root: root,
+                target: None,
+                tools: &tools,
+                quiet: false,
+            };
+            let published = Cell::new(false);
+            let evaluated = Cell::new(false);
+            let code = filter_then_evaluate_with(
+                &execution,
+                &[],
+                |_, _| {
+                    published.set(true);
+                    Ok(paths.clone())
+                },
+                |actual| {
+                    assert!(published.get(), "evaluation must follow publication");
+                    assert_eq!(actual, paths);
+                    evaluated.set(true);
+                    Ok(ExitCode::FAILURE)
+                },
+            )
+            .expect("publication succeeds")
+            .expect("evaluation succeeds");
+            assert!(published.get(), "collection-only mode must still publish reports");
+            assert_eq!(evaluated.get(), !collect_only);
+            assert_eq!(code, if collect_only { ExitCode::SUCCESS } else { ExitCode::FAILURE });
+
+            let error = filter_then_evaluate_with(
+                &execution,
+                &[],
+                |_, _| Err(app_error("publication refused")),
+                |_| panic!("failed publication must not reach evaluation"),
+            )
+            .expect_err("publication failures must fail collection-only mode");
+            assert_eq!(error.to_string(), "publication refused");
+        }
+    }
+
+    #[test]
     fn survivor_publication_filter_preserves_exact_manifest_and_failure_context_without_outputs() {
         let root = Path::new(env!("CARGO_MANIFEST_DIR"));
         let malformed = include_str!("../../../tests/fixtures/lcov/malformed.info");
@@ -1629,6 +1786,7 @@ mod tests {
         CollectionArgs {
             configurations: Vec::new(),
             coverage_dir: PathBuf::from("coverage"),
+            collect_only: false,
             no_coverage_targets: Vec::new(),
             jobs: NonZeroUsize::new(3),
         }
@@ -2256,6 +2414,12 @@ mod tests {
                 for windows_host in [false, true] {
                     let instrumented = nextest_command_for_host(&execution, configuration, windows_host);
                     let report = report_command_for_host(&execution, configuration, Path::new("lcov.info"), windows_host);
+                    assert!(
+                        instrumented
+                            .get_envs()
+                            .any(|(key, value)| key == "LLVM_PROFILE_FILE_NAME" && value == Some(OsStr::new("coverage-%8m.profraw"))),
+                        "every instrumented configuration must merge profiles across test processes"
+                    );
                     assert_command_selection(&instrumented, &expected);
                     assert_command_selection(&report, &expected);
                 }

@@ -61,7 +61,7 @@ finally { Remove-Item Env:ANVIL_CONTAINER_NO_CACHE }
 
 ## 3. Generated files and image contents
 
-- `justfiles/anvil/container.just`: generated recipes.
+- `.anvil/container.just`: generated recipes.
 - `.anvil/container/Dockerfile.dockerignore`: generated build-context filter.
 - `.anvil/container/Dockerfile`: repository-owned file with five Anvil-managed
   regions. Add custom instructions in the gaps; regeneration preserves them.
@@ -80,10 +80,10 @@ Edits inside managed regions require reconciliation; use gaps for additions.
 | `anvil-container-setup` | Packages or configuration needed by repository checks at run time. |
 | `anvil-container-entry` | Final Dockerfile overrides; preserve the launcher's environment and mount contract. |
 
-The build context admits only `.anvil/container/`, `justfiles/anvil/`, root
-toolchain files, and the root `Cargo.toml`. `.anvil-proposed` files are excluded.
-The manifest supplies the MSRV and is removed after setup; workspace source is
-mounted at run time, not built into the image.
+The build context admits only `.anvil/container/`, the six generated
+`.anvil/*.just` files, and root toolchain files. `.anvil-proposed` files are
+excluded. The resolved root MSRV is passed as a build argument; workspace
+source and its manifest are mounted at run time, not built into the image.
 
 Put certificates, installer scripts, and other files needed by custom `COPY`
 instructions under `.anvil/container/`. They then participate in both the build
@@ -94,8 +94,8 @@ copied into the image.
 
 The reference is `anvil-<repo>:<16 hex characters>`. The tag is derived from:
 
-- Every file under `.anvil/container/` and `justfiles/anvil/`, excluding
-  `.anvil-proposed` files.
+- Every file under `.anvil/container/` and the generated `.anvil/*.just`
+  recipe set, excluding `.anvil-proposed` files.
 - Root `rust-toolchain.toml` and `rust-toolchain`, when present.
 - The resolved root MSRV, not the full manifest.
 

@@ -46,6 +46,18 @@ All instrumented packages use the same vendored runtime. Existing dependencies
 on that runtime are redirected while retaining feature settings; an unrelated
 dependency occupying its required crate name is refused.
 
+The executable's implementation crates form one versioned unit, not a reusable
+library API. Internal gamma dependencies use exact version requirements so one
+executable cannot silently combine implementation releases. The user-facing
+`cargo-gamma-attrs` dependency remains compatible within its release line.
+
+### Allocator
+
+The coordinator uses `rallocator` on Linux and Windows and the system allocator
+on other hosts. This choice does not modify the allocators in the binaries under
+test. Platform integration details are in the
+[implementation guide](IMPLEMENTATION.md#executable-boundary).
+
 ## Campaign pipeline
 
 A normal measured campaign proceeds through these dependent stages:
@@ -72,6 +84,13 @@ Target-linkage capture is part of preparation, not a substitute for baseline or
 runtime reach evidence. An empty selection still publishes empty reports rather
 than leaving an earlier campaign's reports in place.
 
+Workspace preparation preserves shared version-control context: Git uses a
+`gitdir:` pointer, while other supported metadata directories (including `.jj`
+and `.hg`) are exposed through links at the prepared workspace root. Artifact
+capture retains those links' identities without traversing their targets and
+permits their external metadata locations. Other directory links still require
+an independently captured source or build-script output tree.
+
 ### Population and source semantics
 
 Package, file, mutator, name, diff, and shard selection define which mutations
@@ -84,7 +103,19 @@ File and diff filters restrict mutations, not the package declarations needed
 to reason about those mutations. Unanalyzable files are reported, not silently
 represented as files with no candidates.
 
+Cached declaration evidence is rejected after its source changes, including
+during scratch-source validation before instrumentation. Reusing discovery
+evidence and inventories preserves population and ordinal order. Non-incremental
+graph resolution retains its offline requirement. Cache lifetime, lookup, and
+metadata reuse are described in the
+[implementation guide](IMPLEMENTATION.md#source-evidence).
+
 The engine uses parsed structure and byte spans but edits the original text.
+Gamma scans Rust lexer tokens in source order and records the byte ranges of line
+and block comments. Using the full literal token keeps a suffix such as `r` from
+being mistaken for the start of a raw string. Scanning finishes at the end of the
+token stream.
+
 Inactive guards must preserve observable evaluation order, moves, borrows,
 temporary lifetimes, and destruction order. Only one mutant may be active in a
 process. In particular, nested replacements need not activate together, but
@@ -99,12 +130,50 @@ Unknown effects or exhausted proof budgets retain the candidate. Some noisy
 optimistic candidate classes are deliberately default-off unless selected
 explicitly; the mutator catalog defines that selection policy.
 
+The [`parameter.default_shadow`](MUTATORS.md) mutator inserts a binding at the
+start of a function body, hiding a parameter with that type's default value.
+Gamma omits this candidate when source evidence proves an unused primitive scalar
+binding and the standard `Default` implementation. Names
+beginning with an underscore alone do not prove disuse. Macros, transforming
+attributes (including enclosing impl attributes), shadowed defaults, and
+non-primitive types retain conservative
+candidate generation.
+
 Statement deletion uses concrete names such as `stmt.delete_call` and
 `stmt.delete_assign` for selection and suppression.
 
 `--in-diff` selects changed mutation sites, not tests affected by a change.
 A test-only edit can select nothing even if it removes protection for unchanged
 production code. A passing diff campaign makes no claim about those other sites.
+An exact, existing, workspace-relative Rust file outside every workspace package
+directory is understood but contributes no mutation sites when no package
+in the selected declaration inventory declares it with `mod` or `#[path]`.
+A diff with such a file still counts as understood if its only other paths
+are unmatched non-Rust files.
+An exact mutation candidate takes precedence, but an exact external file
+checked for module ownership is never redirected to another file by fuzzy
+matching. For a Git rename or copy, the `rename to` or `copy to` header gives
+the destination without a diff prefix. A guessed prefix can help find a
+mutation candidate but cannot justify skipping an unresolved Rust file.
+The standalone skip does not apply to unsafe or absolute paths, missing files,
+or files under a package directory.
+
+Gamma checks module ownership only when a changed file otherwise qualifies for
+the standalone skip. It resolves ordinary module declarations by path, but a
+conditional `#[path]` can select a different file or change the lookup
+directory for an entire inline module. The path of a `mod name;` inside a
+function body or other statement block can also depend on its enclosing
+modules. Rather than untangle those paths, Gamma currently reports an error
+instead of skipping the changed file if it finds either kind of declaration
+in the scanned sources, even if the changed file is unrelated. Incomplete
+declaration analysis also prevents the skip. These diagnostics escape control
+characters in displayed source paths.
+
+Gamma also refuses the skip when it sees `include!` or an unscanned module
+target that could be active in the selected build. An included file or an
+unscanned module could bring additional Rust source into the crate. Gamma
+does not resolve `include!` arguments, expand macros, or follow modules outside
+the inventory.
 
 ### Source policy
 
@@ -113,6 +182,14 @@ test-derived evidence. Suppressed mutants remain visible as `ignored`.
 Attributes and equivalent comment directives support statements and expressions
 where stable Rust cannot accept custom attributes. Malformed directives and
 unmatched configured selectors are errors rather than silent policy changes.
+
+This repository's implementation directives exclude proven functional equivalents
+and unreachable source paths. They also exclude optimization-only mutations:
+the mutation oracle checks functional behavior, not benchmark performance.
+These exclusions retain the useful fast paths and carry narrowly scoped mutator
+selectors with local invariant-based reasons. They are reviewed source policy,
+not test-derived kills. A platform-specific proof must preserve eligibility on
+platforms where the same code can affect behavior.
 
 Source expectations are assertions, not suppressions: governed mutants still
 run and count normally. `expect_killed` requires `killed`; `expect_survived`
@@ -139,6 +216,12 @@ Convergence repeatedly performs three operations:
 A diagnostic near a guard is not necessarily blame. Ownership, lifetime,
 inference cascades, and deletions can fail away from the responsible edit.
 These cases require isolation rather than broad positional attribution.
+Relative and in-workspace diagnostic paths require an exact component match.
+Suffix fallback is reserved for absolute paths outside the workspace and also
+matches path components, never a coincidental string suffix. Both direct
+diagnostic attribution and proof-build validation use this same path policy.
+An unsuccessful isolation build without a relevant compiler error is an infrastructure failure,
+not evidence against its active mutation subset.
 An individually established compiler failure becomes `unviable`, with a bounded
 reason. If a group fails only in combination, one deterministic member is
 removed as `notbuilt`; the interaction does not prove individual unviability.
@@ -162,6 +245,16 @@ combination of individually valid edits from compiling; compiler convergence is
 not proof that every rejected schema member is an invalid standalone mutation.
 
 ### Conditional compiler optimizations
+
+Mutation builds preserve Cargo's selected user rustflags and wrapper nesting,
+including configured wrappers and explicit empty environment overrides. The
+final `--cap-lints=allow` reaches the compiler through the wrapper chain rather
+than depending on which rustflags configuration source Cargo selects.
+Bare selected wrappers are forwarded unchanged through the lint-capping wrapper;
+their spelling is never used to guess executable identity. The private original-
+wrapper marker is cleared before forwarding, so a bare name that resolves to
+Gamma itself cannot recursively reselect itself. Its presence still disables
+compiler replay for user-wrapper invocations.
 
 Proof memoization is scoped to the exact active/background schema and compiler
 context. Cross-round reuse additionally requires a frozen source and mutation
@@ -231,6 +324,10 @@ so those failures can count as kills. Nextest enumeration failures are different
 an unmutated control must establish attribution. A failed or inconclusive control
 produces `flaky`, not a kill.
 
+Libtest-shaped lines printed by child code cannot themselves establish a kill.
+Gamma waits for the harness's exit status; a passing harness remains a pass even
+when captured user output resembles a named-test failure.
+
 Reach observations accompany active-mutant launches. A process-owned sealed
 stream distinguishes reached, not reached, and unknown. Missing, malformed,
 truncated, or descendant-appended streams cannot establish absence. Observation
@@ -275,11 +372,12 @@ Resource exhaustion changes behavior but is not assertion-based detection.
 Unviable, never-built, unknown, and never-run work must not become survivors or
 kills merely to complete the table.
 
-Requested score and flaky gates fail on pending work or an empty gradeable
-population. `--max-flaky` independently limits inconclusive flaky outcomes; it
-is not general intermittent-test detection. The exception is an empty final
-`--in-diff` selection, which succeeds even with gates. A nonempty population
-containing only excluded outcomes is not that exception.
+Requested score and flaky gates fail on pending work or when a nonempty
+population provides no outcomes to grade. `--max-flaky` independently limits
+inconclusive flaky outcomes; it is not general intermittent-test detection.
+An empty final selection is a successful no-op, even with gates, whether the
+run is full or uses `--in-diff`. Nonempty populations containing only excluded
+outcomes still fail the applicable gates.
 
 | Exit | Meaning |
 | ---: | --- |
@@ -316,8 +414,8 @@ Reusable knowledge has deliberately different trust levels:
   outcome is re-established, even when source and environment are unchanged.
   Resume continues the same campaign and is the deliberate exception.
 
-The compiler inventory is seeded from prior completed/incomplete evidence and
-checked-in hints only when absent. Existing entries are authoritative, subject
+The compiler inventory is seeded from prior completed/incomplete evidence only
+when absent. Checked-in hints never create compiler exclusions. Existing entries are authoritative, subject
 to evidence-policy revalidation after attribution or encoding changes.
 Individually proved failures are saved during preparation; interaction-only
 removals are not imported as compiler failures. Retrying a repaired entry
@@ -345,11 +443,17 @@ owned all-in-one layout; `--artifact-dir` relocates published outputs separately
 One process-held workspace lock serializes measured and source-changing commands.
 Ownership markers and a second redirected-cache lock prevent accidental adoption
 or concurrent mutation of another workspace's state.
+The fallback default cache is held to the same linked-path and foreign-writer
+checks as an explicit redirected cache. Test-only cache-home overrides are
+available only in test/internal-feature builds.
 
 Synchronization preserves unchanged bytes and timestamps, updates changed inputs,
 removes deleted inputs, and keeps generated output separate. Relative external
 path dependencies stay anchored to their original locations. These are build
 correctness constraints, not just copy optimizations.
+Case-only renames retain the source spelling, directory-link removal uses the
+platform's supported operation, and failed inventory reads invalidate delta
+sync rather than silently preserving stale entries.
 
 Reports use retained source bytes from the measured generation, not later
 checkout contents, while preserving original project-relative identities.
@@ -386,6 +490,9 @@ name-filtered population cannot prove that absent historical mutants were remove
 withdrawal requires authoritative complete-population evidence. Source
 presentations and latest sightings are tracked separately so filtering cannot
 silently erase retained results.
+For unfiltered source-incompatible verdicts, informational console/HTML output
+remains available, but JSON publication is refused before writes so staged input
+cannot erase incomplete-population evidence.
 
 ## Execution safety and limitations
 
@@ -416,8 +523,23 @@ not provide the Unix ownership checks used for cache ancestors.
 Repository-controlled terminal text is control-character encoded. Published
 reasons use observed outcomes, not raw child output that may contain secrets.
 Local failure artifacts can retain bounded output and execution context.
+Contained command capture drains both streams concurrently with explicit byte
+limits. Oversized stdout is rejected rather than parsed as complete metadata;
+stderr diagnostics retain a bounded tail. Error chains are encoded as terminal
+data, including embedded line breaks, with gamma's own error label styled
+separately. An advisory systemd scope launch is accepted only after the child
+acknowledges startup; refusal before acknowledgement leaves the original
+process's explicit-or-inherited memory policy in force.
+The child acknowledges once, before command execution. A connection or write
+failure stops the child before campaign work so that parent fallback cannot
+execute the campaign a second time.
+Cargo and test descendants retain the relaunch recursion guard but not the
+parent-only startup address, so nested Gamma commands do not acknowledge again.
 The HTML viewer is embedded, with no external viewer code able to read report
-source. Reports themselves contain project source and require appropriate handling.
+source. Its Content-Security-Policy admits only the hashed embedded executable
+scripts, inline viewer styles and data images; network connections, frames,
+external loads, forms and object plugins are disabled. Reports themselves
+contain project source and require appropriate handling.
 
 The remaining limits are intentional:
 
