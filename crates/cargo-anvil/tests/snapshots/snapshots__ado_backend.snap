@@ -942,6 +942,13 @@ anvil-clippy: anvil-clippy-validate-prereqs anvil-impact
 anvil-deny: anvil-deny-validate-prereqs
     cargo each --workspace --once -- cargo {{ anvil_stable_toolchain_arg }} deny check
 
+anvil_test_feature_policy := justfile_directory() + "/.anvil/deny-test-features.json"
+
+# Reject test-only features in dependencies and defaults of publishable packages.
+[group("anvil")]
+anvil-deny-test-features: anvil-deny-test-features-validate-prereqs
+    cargo ensure-no-test-features --manifest-path {{ quote(justfile_directory() + "/Cargo.toml") }} {{ if path_exists(anvil_test_feature_policy) { "--policy " + quote(anvil_test_feature_policy) } else { "" } }}
+
 # Build required-package documentation with rustdoc warnings denied.
 [arg("open", long, value="true")]
 anvil-doc-build open="false": anvil-doc-build-validate-prereqs anvil-impact
@@ -2345,6 +2352,7 @@ anvil-pr-fast: anvil-pr-fast-validate-prereqs \
     anvil-license-headers \
     anvil-ensure-no-cyclic-deps \
     anvil-ensure-no-default-features \
+    anvil-deny-test-features \
     anvil-doc-build \
     anvil-readme-check \
     anvil-spellcheck \
@@ -2899,6 +2907,14 @@ anvil-tool-cargo-ensure-no-default-features-validate-prereqs: (_check-tool "carg
 
 [group("anvil-setup")]
 [private]
+anvil-tool-cargo-ensure-no-test-features-install installer="install": (_install-tool "cargo-ensure-no-test-features" cargo_ensure_no_test_features_version installer)
+
+[group("anvil-setup")]
+[private]
+anvil-tool-cargo-ensure-no-test-features-validate-prereqs: (_check-tool "cargo-ensure-no-test-features" cargo_ensure_no_test_features_version)
+
+[group("anvil-setup")]
+[private]
 anvil-tool-cargo-hack-install installer="install": (_install-tool "cargo-hack" cargo_hack_version installer)
 [group("anvil-setup")]
 [private]
@@ -2990,6 +3006,7 @@ cargo_doc2readme_version := "0.7.3"
 cargo_each_version := "0.8.0"
 cargo_ensure_no_cyclic_deps_version := "0.2.0"
 cargo_ensure_no_default_features_version := "1.1.1"
+cargo_ensure_no_test_features_version := "0.1.0"
 cargo_hack_version := "0.6.45"
 cargo_heather_version := "0.3.0"
 cargo_gamma_version := "0.8.0"
@@ -3158,6 +3175,16 @@ anvil-deny-setup installer="install": (anvil-tool-cargo-deny-install installer) 
 [group("anvil-setup")]
 [private]
 anvil-deny-validate-prereqs: anvil-tool-cargo-deny-validate-prereqs anvil-tool-cargo-each-validate-prereqs
+
+# Install prerequisites for the `anvil-deny-test-features` recipe.
+[group("anvil-setup")]
+[private]
+anvil-deny-test-features-setup installer="install": (anvil-tool-cargo-ensure-no-test-features-install installer)
+
+# Validate prerequisites for the `anvil-deny-test-features` recipe.
+[group("anvil-setup")]
+[private]
+anvil-deny-test-features-validate-prereqs: anvil-tool-cargo-ensure-no-test-features-validate-prereqs
 
 # Install prerequisites for the `anvil-doc-build` recipe.
 [group("anvil-setup")]
@@ -3398,6 +3425,7 @@ anvil-pr-fast-setup installer="install": \
     (anvil-license-headers-setup installer) \
     (anvil-ensure-no-cyclic-deps-setup installer) \
     (anvil-ensure-no-default-features-setup installer) \
+    (anvil-deny-test-features-setup installer) \
     (anvil-doc-build-setup installer) \
     (anvil-readme-check-setup installer) \
     (anvil-spellcheck-setup installer) \
@@ -3418,6 +3446,7 @@ anvil-pr-fast-validate-prereqs: \
     anvil-license-headers-validate-prereqs \
     anvil-ensure-no-cyclic-deps-validate-prereqs \
     anvil-ensure-no-default-features-validate-prereqs \
+    anvil-deny-test-features-validate-prereqs \
     anvil-doc-build-validate-prereqs \
     anvil-readme-check-validate-prereqs \
     anvil-spellcheck-validate-prereqs \

@@ -224,6 +224,14 @@ anvil-tool-cargo-ensure-no-default-features-validate-prereqs: (_check-tool "carg
 
 [group("anvil-setup")]
 [private]
+anvil-tool-cargo-ensure-no-test-features-install installer="install": (_install-tool "cargo-ensure-no-test-features" cargo_ensure_no_test_features_version installer)
+
+[group("anvil-setup")]
+[private]
+anvil-tool-cargo-ensure-no-test-features-validate-prereqs: (_check-tool "cargo-ensure-no-test-features" cargo_ensure_no_test_features_version)
+
+[group("anvil-setup")]
+[private]
 anvil-tool-cargo-hack-install installer="install": (_install-tool "cargo-hack" cargo_hack_version installer)
 [group("anvil-setup")]
 [private]
@@ -315,6 +323,7 @@ cargo_doc2readme_version := "0.7.3"
 cargo_each_version := "0.8.0"
 cargo_ensure_no_cyclic_deps_version := "0.2.0"
 cargo_ensure_no_default_features_version := "1.1.1"
+cargo_ensure_no_test_features_version := "0.1.0"
 cargo_hack_version := "0.6.45"
 cargo_heather_version := "0.3.0"
 cargo_gamma_version := "0.8.0"
@@ -483,6 +492,16 @@ anvil-deny-setup installer="install": (anvil-tool-cargo-deny-install installer) 
 [group("anvil-setup")]
 [private]
 anvil-deny-validate-prereqs: anvil-tool-cargo-deny-validate-prereqs anvil-tool-cargo-each-validate-prereqs
+
+# Install prerequisites for the `anvil-deny-test-features` recipe.
+[group("anvil-setup")]
+[private]
+anvil-deny-test-features-setup installer="install": (anvil-tool-cargo-ensure-no-test-features-install installer)
+
+# Validate prerequisites for the `anvil-deny-test-features` recipe.
+[group("anvil-setup")]
+[private]
+anvil-deny-test-features-validate-prereqs: anvil-tool-cargo-ensure-no-test-features-validate-prereqs
 
 # Install prerequisites for the `anvil-doc-build` recipe.
 [group("anvil-setup")]
@@ -723,6 +742,7 @@ anvil-pr-fast-setup installer="install": \
     (anvil-license-headers-setup installer) \
     (anvil-ensure-no-cyclic-deps-setup installer) \
     (anvil-ensure-no-default-features-setup installer) \
+    (anvil-deny-test-features-setup installer) \
     (anvil-doc-build-setup installer) \
     (anvil-readme-check-setup installer) \
     (anvil-spellcheck-setup installer) \
@@ -743,6 +763,7 @@ anvil-pr-fast-validate-prereqs: \
     anvil-license-headers-validate-prereqs \
     anvil-ensure-no-cyclic-deps-validate-prereqs \
     anvil-ensure-no-default-features-validate-prereqs \
+    anvil-deny-test-features-validate-prereqs \
     anvil-doc-build-validate-prereqs \
     anvil-readme-check-validate-prereqs \
     anvil-spellcheck-validate-prereqs \
