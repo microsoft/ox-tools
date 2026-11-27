@@ -6,6 +6,7 @@
 
 - 🐛 Bug Fixes
 
+  - cargo-anvil: shard runtime analysis jobs
   - cargo-anvil: disable Codecov report discovery
   - cargo-coverage-gate: publish canonical merged LCOV
   - cargo-anvil: defer local coverage detection until setup
@@ -19,6 +20,7 @@
 
 - ✔️ Tasks
 
+  - cargo-anvil: refresh Codecov upload release note
   - cargo-anvil: release v0.29.2 with coverage gate v0.7.7
 
 ## [0.29.1] - 2026-11-27
