@@ -9,4 +9,4 @@ anvil_test_feature_policy := justfile_directory() + "/.anvil/deny-test-features.
 # Reject test-only features in dependencies and defaults of publishable packages.
 [group("anvil")]
 anvil-deny-test-features: anvil-deny-test-features-validate-prereqs
-    cargo {{ anvil_stable_toolchain_arg }} ensure-no-test-features --manifest-path {{ quote(justfile_directory() + "/Cargo.toml") }} {{ if path_exists(anvil_test_feature_policy) { "--policy " + quote(anvil_test_feature_policy) } else { "" } }}
+    cargo ensure-no-test-features --manifest-path {{ quote(justfile_directory() + "/Cargo.toml") }} {{ if path_exists(anvil_test_feature_policy) { "--policy " + quote(anvil_test_feature_policy) } else { "" } }}

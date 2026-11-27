@@ -2,6 +2,16 @@
 
 ## [Unreleased]
 
+## [0.29.0] - 2026-11-27
+
+- ✨ Features
+
+  - cargo-anvil: guard publishable crates against test features
+
+- ✔️ Tasks
+
+  - update Anvil to cargo-gamma 0.8.0 ([#400](https://github.com/microsoft/ox-tools/pull/400))
+
 ## [0.28.5] - 2026-11-26
 
 - 🐛 Bug Fixes

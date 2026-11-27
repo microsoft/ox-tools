@@ -942,135 +942,12 @@ anvil-clippy: anvil-clippy-validate-prereqs anvil-impact
 anvil-deny: anvil-deny-validate-prereqs
     cargo each --workspace --once -- cargo {{ anvil_stable_toolchain_arg }} deny check
 
+anvil_test_feature_policy := justfile_directory() + "/.anvil/deny-test-features.json"
+
 # Reject test-only features in dependencies and defaults of publishable packages.
 [group("anvil")]
-[script("pwsh", "-NoProfile")]
 anvil-deny-test-features: anvil-deny-test-features-validate-prereqs
-    $ErrorActionPreference = 'Stop'
-    $repo = '{{replace(justfile_directory(), "'", "''")}}'
-    $override = Join-Path $repo '.anvil/deny-test-features.json'
-    $bundled = Join-Path $repo '.anvil/deny-test-features.defaults.json'
-    $policyPath = if (Test-Path -LiteralPath $override) { $override } else { $bundled }
-    $prefix = 'anvil-deny-test-features'
-    $ordinal = [StringComparer]::Ordinal
-    $denied = [Collections.Generic.HashSet[string]]::new($ordinal)
-    $exempt = [Collections.Generic.HashSet[string]]::new($ordinal)
-    function ExceptionKey($package, $dependency, $feature) {
-        return (ConvertTo-Json -InputObject @($package, $dependency, $feature) -Compress)
-    }
-
-    try {
-        $policy = Get-Content -LiteralPath $policyPath -Raw | ConvertFrom-Json -AsHashtable -NoEnumerate
-        if ($policy -isnot [System.Collections.IDictionary] -or
-            ($policy.Contains('features') -and $policy.features -isnot [array]) -or
-            ($policy.Contains('exceptions') -and $policy.exceptions -isnot [array]) -or
-            @($policy.Keys | Where-Object { $_ -cnotin @('features', 'exceptions', '$comment') }).Count -ne 0) {
-            throw 'expected an object with features and/or exceptions arrays'
-        }
-        $features = $policy.features
-        if (-not $policy.Contains('features')) {
-            $features = (Get-Content -LiteralPath $bundled -Raw | ConvertFrom-Json -AsHashtable).features
-        }
-        foreach ($feature in $features) {
-            if ($feature -isnot [string] -or [string]::IsNullOrWhiteSpace($feature) -or -not $denied.Add($feature)) {
-                throw 'features must contain unique, nonempty strings'
-            }
-        }
-        if ($denied.Count -eq 0) { throw 'features must contain at least one feature' }
-        foreach ($entry in $policy.exceptions) {
-            if ($entry -isnot [System.Collections.IDictionary] -or
-                $entry.package -isnot [string] -or [string]::IsNullOrWhiteSpace($entry.package) -or
-                $entry.feature -isnot [string] -or -not $denied.Contains($entry.feature) -or
-                ($entry.Contains('dependency') -and
-                    ($entry.dependency -isnot [string] -or [string]::IsNullOrWhiteSpace($entry.dependency))) -or
-                @($entry.Keys | Where-Object { $_ -cnotin @('package', 'dependency', 'feature') }).Count -ne 0) {
-                throw 'each exception requires a package, a denied feature, and an optional dependency key'
-            }
-            if (-not $exempt.Add((ExceptionKey $entry.package $entry.dependency $entry.feature))) {
-                throw 'duplicate exception'
-            }
-        }
-    } catch {
-        Write-Error "${prefix}: invalid policy at ${policyPath}: $_"
-    }
-
-    $metadataText = & cargo {{ anvil_stable_toolchain_arg }} metadata --no-deps --format-version 1 --manifest-path (Join-Path $repo 'Cargo.toml')
-    if ($LASTEXITCODE -ne 0) { Write-Error "${prefix}: cargo metadata failed (exit $LASTEXITCODE)" }
-    try {
-        $metadata = $metadataText -join "`n" | ConvertFrom-Json -AsHashtable -NoEnumerate
-        if ($metadata -isnot [System.Collections.IDictionary] -or
-            $metadata.packages -isnot [array] -or $metadata.workspace_members -isnot [array]) {
-            throw 'expected packages and workspace_members arrays'
-        }
-        $packages = [Collections.Generic.Dictionary[string, object]]::new($ordinal)
-        foreach ($package in $metadata.packages) { $packages.Add($package.id, $package) }
-        $violations = [Collections.Generic.SortedSet[string]]::new($ordinal)
-        foreach ($id in $metadata.workspace_members) {
-            $package = $packages[$id]
-            if ($null -eq $package -or -not $package.Contains('publish') -or
-                ($null -ne $package.publish -and $package.publish -isnot [array])) {
-                throw "missing package or invalid publish field for workspace member '$id'"
-            }
-            if ($null -ne $package.publish -and $package.publish.Count -eq 0) { continue }
-            if ($package.name -isnot [string] -or $package.manifest_path -isnot [string] -or
-                $package.dependencies -isnot [array] -or $package.features -isnot [System.Collections.IDictionary]) {
-                throw "invalid dependencies or features for '$id'"
-            }
-            $manifest = [IO.Path]::GetRelativePath($repo, $package.manifest_path)
-            $dependencies = [Collections.Generic.HashSet[string]]::new($ordinal)
-            foreach ($dep in $package.dependencies) {
-                if (-not $dep.Contains('kind') -or $dep.kind -cnotin @($null, 'normal', 'build', 'dev') -or
-                    $dep.name -isnot [string] -or $dep.features -isnot [array]) {
-                    throw "invalid dependency for '$id'"
-                }
-                if ($dep.kind -ceq 'dev') { continue }
-                $key = $dep.rename ?? $dep.name
-                [void]$dependencies.Add($key)
-                $kind = $dep.kind ?? 'normal'
-                $target = if ($dep.target) { ", target $($dep.target)" } else { '' }
-                foreach ($feature in $dep.features) {
-                    if ($feature -isnot [string]) { throw "invalid dependency feature for '$id'" }
-                    if ($denied.Contains($feature) -and -not $exempt.Contains((ExceptionKey $package.name $key $feature))) {
-                        [void]$violations.Add("${manifest}: '$($package.name)' requests '$feature' on dependency '$key' (package '$($dep.name)', $kind$target)")
-                    }
-                }
-            }
-
-            $pending = [Collections.Generic.Stack[string]]::new()
-            $seen = [Collections.Generic.HashSet[string]]::new($ordinal)
-            $pending.Push('default')
-            while ($pending.Count -gt 0) {
-                $feature = $pending.Pop()
-                if (-not $seen.Add($feature)) { continue }
-                if ($denied.Contains($feature) -and -not $exempt.Contains((ExceptionKey $package.name $null $feature))) {
-                    [void]$violations.Add("${manifest}: '$($package.name)' enables its own '$feature' through default features")
-                }
-                $items = $package.features[$feature]
-                if ($package.features.Contains($feature) -and $items -isnot [array]) {
-                    throw "invalid feature definition '$feature' for '$id'"
-                }
-                foreach ($item in $items) {
-                    if ($item -isnot [string]) { throw "invalid feature entry for '$id'" }
-                    if ($item -cmatch '^([^/]+?)(\?)?/(.+)$') {
-                        $key = $Matches[1]
-                        $forwarded = $Matches[3]
-                        if ($dependencies.Contains($key) -and $denied.Contains($forwarded) -and
-                            -not $exempt.Contains((ExceptionKey $package.name $key $forwarded))) {
-                            [void]$violations.Add("${manifest}: '$($package.name)' forwards '$forwarded' to dependency '$key' through default features")
-                        }
-                    } elseif (-not $item.StartsWith('dep:', [StringComparison]::Ordinal)) {
-                        $pending.Push($item)
-                    }
-                }
-            }
-        }
-    } catch {
-        Write-Error "${prefix}: could not parse cargo metadata output: $_"
-    }
-    if ($violations.Count -gt 0) {
-        foreach ($violation in $violations) { [Console]::Error.WriteLine("${prefix}: $violation") }
-        Write-Error "${prefix}: remove these requests from production dependencies and defaults (check inherited workspace dependencies too), or add an exact exception in .anvil/deny-test-features.json"
-    }
+    cargo ensure-no-test-features --manifest-path {{ quote(justfile_directory() + "/Cargo.toml") }} {{ if path_exists(anvil_test_feature_policy) { "--policy " + quote(anvil_test_feature_policy) } else { "" } }}
 
 # Build required-package documentation with rustdoc warnings denied.
 [arg("open", long, value="true")]
@@ -2447,13 +2324,6 @@ anvil-container-down:
     }
     exit 0
 
-=== .anvil/deny-test-features.defaults.json ===
-{
-  "$comment": "GENERATED BY cargo-anvil. DO NOT EDIT DIRECTLY unless you intend to depart from anvil-provided defaults.",
-  "features": ["fakes", "test-util", "insecure"],
-  "exceptions": []
-}
-
 === .anvil/groups.just ===
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
@@ -3037,6 +2907,14 @@ anvil-tool-cargo-ensure-no-default-features-validate-prereqs: (_check-tool "carg
 
 [group("anvil-setup")]
 [private]
+anvil-tool-cargo-ensure-no-test-features-install installer="install": (_install-tool "cargo-ensure-no-test-features" cargo_ensure_no_test_features_version installer)
+
+[group("anvil-setup")]
+[private]
+anvil-tool-cargo-ensure-no-test-features-validate-prereqs: (_check-tool "cargo-ensure-no-test-features" cargo_ensure_no_test_features_version)
+
+[group("anvil-setup")]
+[private]
 anvil-tool-cargo-hack-install installer="install": (_install-tool "cargo-hack" cargo_hack_version installer)
 [group("anvil-setup")]
 [private]
@@ -3128,6 +3006,7 @@ cargo_doc2readme_version := "0.7.3"
 cargo_each_version := "0.8.0"
 cargo_ensure_no_cyclic_deps_version := "0.2.0"
 cargo_ensure_no_default_features_version := "1.1.1"
+cargo_ensure_no_test_features_version := "0.1.0"
 cargo_hack_version := "0.6.45"
 cargo_heather_version := "0.3.0"
 cargo_gamma_version := "0.8.0"
@@ -3300,12 +3179,12 @@ anvil-deny-validate-prereqs: anvil-tool-cargo-deny-validate-prereqs anvil-tool-c
 # Install prerequisites for the `anvil-deny-test-features` recipe.
 [group("anvil-setup")]
 [private]
-anvil-deny-test-features-setup installer="install": (anvil-tool-cargo-each-install installer)
+anvil-deny-test-features-setup installer="install": (anvil-tool-cargo-ensure-no-test-features-install installer)
 
 # Validate prerequisites for the `anvil-deny-test-features` recipe.
 [group("anvil-setup")]
 [private]
-anvil-deny-test-features-validate-prereqs: anvil-tool-rustc-validate-prereqs
+anvil-deny-test-features-validate-prereqs: anvil-tool-cargo-ensure-no-test-features-validate-prereqs
 
 # Install prerequisites for the `anvil-doc-build` recipe.
 [group("anvil-setup")]
