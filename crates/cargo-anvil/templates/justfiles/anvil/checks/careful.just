@@ -5,4 +5,4 @@
 # Regenerate with cargo-anvil to update this file.
 # Run affected tests with cargo-careful runtime checks.
 anvil-careful: anvil-careful-validate-prereqs anvil-impact
-    {{ anvil_careful_prefix }}cargo +{{ rust_nightly }} each {{ anvil_affected_selection }} --once -- cargo +{{ rust_nightly }} careful test '{packages}' --all-features --locked --target-dir {{ quote(anvil_careful_target_dir) }}
+    {{ anvil_careful_prefix }}cargo +{{ rust_nightly }} each {{ anvil_affected_selection }} --once -- cargo +{{ rust_nightly }} careful test '{cargo-specs}' --all-features --locked --target-dir {{ quote(anvil_careful_target_dir) }}

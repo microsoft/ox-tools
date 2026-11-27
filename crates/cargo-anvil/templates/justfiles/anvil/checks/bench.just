@@ -6,4 +6,4 @@
 
 # Compile affected benchmarks without running them.
 anvil-bench: anvil-bench-validate-prereqs anvil-impact
-    cargo each {{ anvil_affected_selection }} --once -- cargo {{ anvil_stable_toolchain_arg }} bench '{packages}' --all-features --no-run
+    cargo each {{ anvil_affected_selection }} --once -- cargo {{ anvil_stable_toolchain_arg }} bench '{cargo-specs}' --all-features --no-run

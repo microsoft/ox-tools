@@ -6,4 +6,4 @@
 
 # Lint affected packages and all targets with warnings denied.
 anvil-clippy: anvil-clippy-validate-prereqs anvil-impact
-    cargo each {{ anvil_affected_selection }} --once -- cargo {{ anvil_stable_toolchain_arg }} clippy '{packages}' --all-targets --all-features --locked -- -D warnings
+    cargo each {{ anvil_affected_selection }} --once -- cargo {{ anvil_stable_toolchain_arg }} clippy '{cargo-specs}' --all-targets --all-features --locked -- -D warnings

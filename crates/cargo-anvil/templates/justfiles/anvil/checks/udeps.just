@@ -6,5 +6,5 @@
 
 # Check required packages for unused normal and development dependencies.
 anvil-udeps: anvil-udeps-validate-prereqs anvil-impact
-    cargo +{{ rust_nightly }} each {{ anvil_required_selection }} --once -- cargo +{{ rust_nightly }} udeps '{packages}' --all-features
-    cargo +{{ rust_nightly }} each {{ anvil_required_selection }} --once -- cargo +{{ rust_nightly }} udeps '{packages}' --all-features --all-targets
+    cargo +{{ rust_nightly }} each {{ anvil_required_selection }} --once -- cargo +{{ rust_nightly }} udeps '{cargo-specs}' --all-features
+    cargo +{{ rust_nightly }} each {{ anvil_required_selection }} --once -- cargo +{{ rust_nightly }} udeps '{cargo-specs}' --all-features --all-targets

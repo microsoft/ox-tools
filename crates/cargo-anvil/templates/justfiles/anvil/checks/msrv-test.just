@@ -6,5 +6,5 @@
 
 # Run affected tests under the declared workspace MSRV; no MSRV is a no-op.
 anvil-msrv-test: anvil-msrv-test-validate-prereqs anvil-impact
-    cargo each {{ anvil_msrv_selection }} --once -- cargo '+{workspace-rust-version}' test '{packages}' --tests --all-features --locked
-    cargo each {{ anvil_msrv_selection }} --once -- cargo '+{workspace-rust-version}' test '{packages}' --tests --locked
+    cargo each {{ anvil_msrv_selection }} --once -- cargo '+{workspace-rust-version}' test '{cargo-specs}' --tests --all-features --locked
+    cargo each {{ anvil_msrv_selection }} --once -- cargo '+{workspace-rust-version}' test '{cargo-specs}' --tests --locked

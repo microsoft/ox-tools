@@ -218,6 +218,15 @@ are needed. The invocation id defaults to the Just process id and is inherited
 by nested invocations. Local package files remain until `target/` is cleaned;
 they are not an impact-result cache and are recomputed on each invocation.
 
+Cargo-each 0.9.0 or newer resolves these portable name/version inputs against
+workspace members. Cargo-facing commands use `{cargo-specs}` in once mode and
+`{cargo-spec}` per package or target, preserving the exact Cargo metadata IDs
+so a workspace member remains unambiguous when a dependency has the same name
+and version. Untouched full-workspace selections still use `--workspace`;
+filtered selections use explicit member IDs, and empty selections run nothing.
+Coverage-gate retains `{packages}` because its own selector interface accepts
+workspace names and name/version specifications, not Cargo metadata IDs.
+
 Cargo-delta caches baseline and current snapshots under the Cargo target
 directory's `cargo-delta/`. Its embedded keys include checkout content,
 configuration, workspace identity, and tool version. Repeated tier calculations
