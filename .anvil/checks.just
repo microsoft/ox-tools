@@ -117,7 +117,7 @@ anvil-llvm-cov: anvil-llvm-cov-validate-prereqs anvil-impact
 
 # Run affected Loom test targets with the Loom configuration.
 anvil-loom: anvil-loom-validate-prereqs anvil-impact
-    cargo each {{ anvil_affected_selection }} --filter feature:loom --each-target test --target-filter required-feature:loom --require-target-per-package -- cargo {{ anvil_stable_toolchain_arg }} test --config {{ quote('build.rustflags=["--cfg","loom"]') }} --package '{cargo-spec}' --release --all-features --locked --test '{target}' -- --test-threads=1
+    cargo each {{ anvil_affected_selection }} --filter feature:loom --each-target test --target-filter required-feature:loom --require-target-per-package -- cargo {{ anvil_stable_toolchain_arg }} nextest run --config {{ quote('target."cfg(all())".rustflags=["--cfg","loom"]') }} --package '{cargo-spec}' --cargo-profile release --all-features --locked --test '{target}' --no-tests fail
 
 # Run Miri tests for affected workspace packages.
 [arg("example", long, pattern='(?:[A-Za-z0-9_.-]+)?')]

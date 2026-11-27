@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+## [0.29.1] - 2026-11-27
+
+- ⚡ Performance
+
+  - shorten runtime analysis without truncating model exploration
+
 ## [0.29.0] - 2026-11-27
 
 - ✨ Features

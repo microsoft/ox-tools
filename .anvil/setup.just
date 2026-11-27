@@ -594,12 +594,12 @@ anvil-llvm-cov-validate-prereqs: anvil-component-nightly-llvm-tools-validate-pre
 # Install prerequisites for the `anvil-loom` recipe.
 [group("anvil-setup")]
 [private]
-anvil-loom-setup installer="install": (anvil-tool-cargo-each-install installer)
+anvil-loom-setup installer="install": (anvil-tool-cargo-each-install installer) (anvil-tool-cargo-nextest-install installer)
 
 # Validate prerequisites for the `anvil-loom` recipe.
 [group("anvil-setup")]
 [private]
-anvil-loom-validate-prereqs: anvil-tool-rustc-validate-prereqs anvil-tool-cargo-each-validate-prereqs
+anvil-loom-validate-prereqs: anvil-tool-rustc-validate-prereqs anvil-tool-cargo-each-validate-prereqs anvil-tool-cargo-nextest-validate-prereqs
 
 # --- pr-runtime-analysis members ---
 

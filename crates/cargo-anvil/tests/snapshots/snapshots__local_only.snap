@@ -142,7 +142,7 @@ anvil-llvm-cov: anvil-llvm-cov-validate-prereqs anvil-impact
 
 # Run affected Loom test targets with the Loom configuration.
 anvil-loom: anvil-loom-validate-prereqs anvil-impact
-    cargo each {{ anvil_affected_selection }} --filter feature:loom --each-target test --target-filter required-feature:loom --require-target-per-package -- cargo {{ anvil_stable_toolchain_arg }} test --config {{ quote('build.rustflags=["--cfg","loom"]') }} --package '{cargo-spec}' --release --all-features --locked --test '{target}' -- --test-threads=1
+    cargo each {{ anvil_affected_selection }} --filter feature:loom --each-target test --target-filter required-feature:loom --require-target-per-package -- cargo {{ anvil_stable_toolchain_arg }} nextest run --config {{ quote('target."cfg(all())".rustflags=["--cfg","loom"]') }} --package '{cargo-spec}' --cargo-profile release --all-features --locked --test '{target}' --no-tests fail
 
 # Run Miri tests for affected workspace packages.
 [arg("example", long, pattern='(?:[A-Za-z0-9_.-]+)?')]
@@ -2424,12 +2424,12 @@ anvil-llvm-cov-validate-prereqs: anvil-component-nightly-llvm-tools-validate-pre
 # Install prerequisites for the `anvil-loom` recipe.
 [group("anvil-setup")]
 [private]
-anvil-loom-setup installer="install": (anvil-tool-cargo-each-install installer)
+anvil-loom-setup installer="install": (anvil-tool-cargo-each-install installer) (anvil-tool-cargo-nextest-install installer)
 
 # Validate prerequisites for the `anvil-loom` recipe.
 [group("anvil-setup")]
 [private]
-anvil-loom-validate-prereqs: anvil-tool-rustc-validate-prereqs anvil-tool-cargo-each-validate-prereqs
+anvil-loom-validate-prereqs: anvil-tool-rustc-validate-prereqs anvil-tool-cargo-each-validate-prereqs anvil-tool-cargo-nextest-validate-prereqs
 
 # --- pr-runtime-analysis members ---
 
