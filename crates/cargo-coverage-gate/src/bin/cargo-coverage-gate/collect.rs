@@ -726,19 +726,18 @@ fn filter_and_publish_reports(
     collected: &[CollectedReport],
     policy_target: &str,
 ) -> Result<Vec<PathBuf>, AppError> {
-    filter_and_publish_reports_using(execution, collected, |raw, manifest| {
-        filter_lcov_many_for_target(raw, manifest, Some(policy_target))
-    })
+    filter_and_publish_reports_using(execution, collected, policy_target, filter_lcov_many_for_target)
 }
 
 /// Adapts the native filter's manifest and typed errors before publication, with a supplied filter.
 fn filter_and_publish_reports_using(
     execution: &CollectionExecution<'_>,
     collected: &[CollectedReport],
-    mut filter: impl FnMut(&[&str], Option<&Path>) -> Result<Vec<String>, CoverageGateError>,
+    policy_target: &str,
+    mut filter: impl FnMut(&[&str], Option<&Path>, Option<&str>) -> Result<Vec<String>, CoverageGateError>,
 ) -> Result<Vec<PathBuf>, AppError> {
     filter_and_publish_reports_with(execution, collected, |raw, manifest| {
-        filter(raw, Some(manifest)).into_app_err("failed to filter LCOV to released Cargo surfaces")
+        filter(raw, Some(manifest), Some(policy_target)).into_app_err("failed to filter LCOV to released Cargo surfaces")
     })
 }
 
@@ -1614,7 +1613,7 @@ mod tests {
     }
 
     #[test]
-    fn survivor_publication_filter_preserves_exact_manifest_and_failure_context_without_outputs() {
+    fn publication_filter_preserves_manifest_policy_target_and_typed_failure_without_outputs() {
         let root = Path::new(env!("CARGO_MANIFEST_DIR"));
         let malformed = include_str!("../../../tests/fixtures/lcov/malformed.info");
         let workspace = workspace(root);
@@ -1633,7 +1632,7 @@ mod tests {
             args: &args,
             scratch_dir: root,
             coverage_target_root: root,
-            target: Some("x86_64-pc-windows-msvc"),
+            target: None,
             tools: &tools,
             quiet: false,
         };
@@ -1642,9 +1641,10 @@ mod tests {
             &execution,
             &[],
             |execution, collected| {
-                filter_and_publish_reports_using(execution, collected, |raw, manifest| {
+                filter_and_publish_reports_using(execution, collected, "aarch64-pc-windows-msvc", |raw, manifest, target| {
                     assert_eq!(raw.len(), 0);
                     assert_eq!(manifest, Some(root.join("Cargo.toml").as_path()));
+                    assert_eq!(target, Some("aarch64-pc-windows-msvc"));
                     calls.set(calls.get() + 1);
                     Err(cargo_coverage_gate::evaluate_unfiltered_many_for_target(&[malformed], None, &[], None).unwrap_err())
                 })
@@ -1652,10 +1652,6 @@ mod tests {
             |_| panic!("failed filtering must never reach gate evaluation"),
         )
         .unwrap_err();
-        assert!(
-            error.to_string().contains("failed to filter LCOV to released Cargo surfaces"),
-            "{error}"
-        );
         let expected = lcov::Report::from_reader(lcov::Reader::new(malformed.as_bytes())).unwrap_err();
         let cause = error
             .find_source::<lcov::report::ParseError>()

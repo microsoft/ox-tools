@@ -1745,7 +1745,7 @@ pub(crate) fn filter_reports_with_metadata(reports: Vec<lcov::Report>, metadata:
     filter_reports_with_compiler_loader(reports, metadata, discover_compiler_library)
 }
 
-fn filter_reports_with_compiler_loader(
+pub(crate) fn filter_reports_with_compiler_loader(
     reports: Vec<lcov::Report>,
     metadata: &Metadata,
     load_compiler_library: impl FnOnce(&Path) -> Result<Option<PathBuf>, CoverageGateError>,

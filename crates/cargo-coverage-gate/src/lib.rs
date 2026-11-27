@@ -489,7 +489,16 @@ fn filter_reports_with_policy(
     metadata: &cargo_metadata::Metadata,
     workspace: &workspace::Workspace,
 ) -> Result<Vec<String>, CoverageGateError> {
-    let filtered = source_filter::filter_reports_with_metadata(reports, metadata)?;
+    filter_reports_with_policy_using(reports, metadata, workspace, source_filter::filter_reports_with_metadata)
+}
+
+fn filter_reports_with_policy_using(
+    reports: Vec<lcov::Report>,
+    metadata: &cargo_metadata::Metadata,
+    workspace: &workspace::Workspace,
+    filter_sources: impl FnOnce(Vec<lcov::Report>, &cargo_metadata::Metadata) -> Result<Vec<String>, CoverageGateError>,
+) -> Result<Vec<String>, CoverageGateError> {
+    let filtered = filter_sources(reports, metadata)?;
     let refs = filtered.iter().map(String::as_str).collect::<Vec<_>>();
     // Validate merged checksums before omitting any package's evidence.
     lcov_cov::CoverageReport::from_strs(&refs)?;
@@ -773,8 +782,11 @@ mod tests {
                         evaluate_unfiltered_many(&[""], manifest.as_deref(), &[]).map(|_| ()),
                         evaluate_unfiltered_many_for_target(&[""], manifest.as_deref(), &[], None).map(|_| ()),
                     ] {
-                        let error = result.unwrap_err().to_string();
-                        assert!(error.contains("public-wrapper-manifest-probe"), "{error}");
+                        let error = result.unwrap_err();
+                        assert_eq!(
+                            error_cause::<crate::error::InvalidPackageSelectorError>(&error).selector,
+                            "public-wrapper-manifest-probe"
+                        );
                     }
                 },
             );
@@ -834,7 +846,10 @@ mod tests {
     }
 
     fn fixture_metadata() -> cargo_metadata::Metadata {
-        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/source-index");
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests")
+            .join("fixtures")
+            .join("source-index");
         let member = root.join("member");
         let package_id = "path+file:///coverage-public-wrapper#member@0.1.0";
         serde_json::from_value(json!({
@@ -852,7 +867,7 @@ mod tests {
                     "kind": ["lib"],
                     "crate_types": ["lib"],
                     "name": "member",
-                    "src_path": member.join("src/lib.rs"),
+                    "src_path": member.join("src").join("lib.rs"),
                     "edition": "2024",
                     "doc": true,
                     "doctest": true,
@@ -903,12 +918,215 @@ mod tests {
             workspace.members[0].min_lines_percent = package;
             workspace.members[0].expect_no_coverable_lines = assertion;
             let filtered = filter_reports_with_policy(source_filter::parse_reports(&[&raw]).unwrap(), &metadata, &workspace).unwrap();
-            assert_eq!(filtered.len(), 1);
-            assert_eq!(filtered[0].is_empty(), omitted, "{package:?}, {default:?}, {assertion}");
-            if !omitted {
-                assert!(filtered[0].contains("DA:4,0"), "{}", filtered[0]);
+            let expected = if omitted { String::new() } else { canonical_lcov(&raw) };
+            assert_eq!(filtered, [expected], "{package:?}, {default:?}, {assertion}");
+        }
+    }
+
+    fn error_cause<E: std::error::Error + 'static>(error: &CoverageGateError) -> &E {
+        std::iter::successors(Some(error as &(dyn std::error::Error + 'static)), |source| source.source())
+            .find_map(<dyn std::error::Error>::downcast_ref::<E>)
+            .expect("the tested failure must preserve its typed error cause")
+    }
+
+    fn canonical_lcov(input: &str) -> String {
+        let report = lcov::Report::from_reader(lcov::Reader::new(input.as_bytes())).unwrap();
+        let mut output = String::new();
+        for record in report.into_records() {
+            use std::fmt::Write as _;
+            writeln!(&mut output, "{record}").unwrap();
+        }
+        output
+    }
+
+    fn policy_metadata() -> cargo_metadata::Metadata {
+        let mut metadata = fixture_metadata();
+        let root = metadata.workspace_root.clone();
+        let mut outer = metadata.packages[0].clone();
+        outer.name = serde_json::from_value(json!("outer")).unwrap();
+        outer.id = cargo_metadata::PackageId {
+            repr: "path+file:///coverage-policy#outer@0.1.0".to_owned(),
+        };
+        outer.manifest_path = root.join("Cargo.toml");
+        outer.targets[0].name = "outer".to_owned();
+        outer.targets[0].src_path = root.join("external-lib.rs");
+        outer.metadata = json!({"coverage-gate": {"min-lines-percent": 0}});
+        metadata.workspace_members.push(outer.id.clone());
+        metadata.packages.push(outer);
+        metadata
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore = "source filtering reads immutable checked-in fixtures")]
+    fn policy_reports_preserve_batch_order_nested_owners_and_cross_package_hits() {
+        let metadata = policy_metadata();
+        let outer = metadata.packages[1].targets[0].src_path.as_std_path();
+        let member = metadata.packages[0].targets[0].src_path.as_std_path();
+        let misses = format!(
+            "TN:outer-tests\nSF:{}\nDA:4,0\nend_of_record\n\
+             TN:member-tests\nSF:{}\nDA:4,0\nend_of_record\n",
+            outer.display(),
+            member.display()
+        );
+        let hits = format!("TN:outer-tests\nSF:{}\nDA:4,5\nend_of_record\n", member.display());
+        let ws = workspace::Workspace::from_metadata(&metadata, None).unwrap();
+        let filtered = filter_reports_with_policy(source_filter::parse_reports(&[&misses, &hits]).unwrap(), &metadata, &ws).unwrap();
+        let expected_miss = format!("TN:member-tests\nSF:{}\nDA:4,0\nend_of_record\n", member.display());
+        assert_eq!(filtered, [canonical_lcov(&expected_miss), canonical_lcov(&hits)]);
+        let report = evaluate_reports_with_metadata(
+            source_filter::parse_reports(&[&misses, &hits]).unwrap(),
+            &metadata,
+            &["member".to_owned()],
+            None,
+        )
+        .unwrap();
+        assert_eq!(report.verdict(), Verdict::Pass);
+        let outcome = &report.inner.outcomes[0];
+        assert_eq!(
+            (&outcome.name, outcome.totals.count, outcome.totals.covered),
+            (&"member".to_owned(), 1, 1)
+        );
+
+        let raw = evaluate_unfiltered_many_for_target_with_metadata_loader(&[&misses], None, &["outer".to_owned()], None, |_| Ok(metadata))
+            .unwrap();
+        assert_eq!(raw.inner.outcomes[0].totals.count, 1);
+        assert_eq!(raw.inner.outcomes[0].totals.covered, 0);
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore = "source filtering reads immutable checked-in fixtures")]
+    fn policy_reports_resolve_target_replacements_without_querying_host_tools() {
+        let mut metadata = fixture_metadata();
+        metadata.packages[0].metadata = json!({"coverage-gate": {
+            "min-lines-percent": 0,
+            "target": {
+                "cfg(unix)": {"min-lines-percent": 0},
+                "x86_64-unknown-linux-gnu": {"min-lines-percent": 50},
+                "aarch64-unknown-linux-gnu": {"expect-no-coverable-lines": true}
+            }
+        }});
+        let source = metadata.packages[0].targets[0].src_path.as_std_path();
+        let raw = format!("TN:\nSF:{}\nDA:4,0\nend_of_record\n", source.display());
+        metadata.workspace_metadata = json!({"coverage-gate": {"min-lines-percent": 0}});
+        for (base, triple, cfg, expected) in [
+            (0, "x86_64-unknown-linux-gnu", &["unix"][..], canonical_lcov(&raw)),
+            (0, "aarch64-unknown-linux-gnu", &["unix"][..], canonical_lcov(&raw)),
+            (0, "x86_64-pc-windows-msvc", &["windows"][..], String::new()),
+            (100, "powerpc64-unknown-linux-gnu", &["unix"][..], String::new()),
+        ] {
+            metadata.packages[0].metadata["coverage-gate"]["min-lines-percent"] = json!(base);
+            let ws =
+                workspace::Workspace::from_metadata_with_target_resolver(&metadata, || Ok(target::TargetContext::from_parts(triple, cfg)))
+                    .unwrap();
+            let filtered = filter_reports_with_policy(source_filter::parse_reports(&[&raw]).unwrap(), &metadata, &ws).unwrap();
+            assert_eq!(filtered, [expected]);
+            if triple == "aarch64-unknown-linux-gnu" {
+                let coverage = lcov_cov::CoverageReport::from_strs(&[&filtered[0]]).unwrap();
+                let report = verdict::evaluate(&coverage, &ws, &[]).unwrap();
+                assert_eq!(report.verdict(), Verdict::Fail);
+                assert_eq!(report.outcomes[0].status, verdict::Status::UnexpectedCoverableLines);
+                assert_eq!(
+                    report.outcomes[0].diagnostics,
+                    [verdict::LineDiagnostic {
+                        path: PathBuf::from("src").join("lib.rs"),
+                        lines: vec![4],
+                    }]
+                );
             }
         }
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore = "source filtering reads immutable checked-in fixtures")]
+    fn policy_reports_validate_line_bounds_before_omitting_zero_packages() {
+        let mut metadata = fixture_metadata();
+        metadata.packages[0].metadata = json!({"coverage-gate": {"min-lines-percent": 0}});
+        let source = metadata.packages[0].targets[0].src_path.as_std_path();
+        let raw = format!("SF:{}\nDA:999999,0\nend_of_record\n", source.display());
+        let ws = workspace::Workspace::from_metadata(&metadata, None).unwrap();
+        let error = filter_reports_with_policy(source_filter::parse_reports(&[&raw]).unwrap(), &metadata, &ws).unwrap_err();
+        let cause = error_cause::<crate::error::CoverageLineOutOfRangeError>(&error);
+        assert_eq!(cause.path, source.display().to_string());
+        assert_eq!(cause.line, 999_999);
+        assert_eq!(
+            cause.line_count,
+            include_str!("../tests/fixtures/source-index/member/src/lib.rs").lines().count()
+        );
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore = "source filtering reads immutable checked-in fixtures")]
+    fn policy_reports_validate_merged_checksums_before_omitting_zero_packages() {
+        let mut metadata = fixture_metadata();
+        metadata.packages[0].metadata = json!({"coverage-gate": {"min-lines-percent": 0}});
+        let source = metadata.packages[0].targets[0].src_path.as_std_path();
+        let first = format!("TN:first\nSF:{}\nDA:4,0,first\nend_of_record\n", source.display());
+        let second = format!("TN:second\nSF:{}\nDA:4,1,second\nend_of_record\n", source.display());
+        let ws = workspace::Workspace::from_metadata(&metadata, None).unwrap();
+        for inputs in [vec![first.clone(), second.clone()], vec![format!("{first}{second}")]] {
+            let refs = inputs.iter().map(String::as_str).collect::<Vec<_>>();
+            let error = filter_reports_with_policy(source_filter::parse_reports(&refs).unwrap(), &metadata, &ws).unwrap_err();
+            let cause = error_cause::<crate::error::MergedSourceChecksumError>(&error);
+            assert_eq!(cause.path, source.display().to_string());
+            assert_eq!(cause.line, 4);
+        }
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore = "source filtering reads immutable checked-in fixtures")]
+    fn policy_reports_reject_unowned_sources_with_scripted_compiler_provenance() {
+        let mut metadata = fixture_metadata();
+        metadata.packages[0].metadata = json!({"coverage-gate": {"min-lines-percent": 0}});
+        let source = metadata.workspace_root.join("external-lib.rs");
+        let raw = format!("SF:{source}\nDA:4,0\nend_of_record\n");
+        let ws = workspace::Workspace::from_metadata(&metadata, None).unwrap();
+        let calls = std::cell::Cell::new(0);
+        let error = filter_reports_with_policy_using(
+            source_filter::parse_reports(&[&raw]).unwrap(),
+            &metadata,
+            &ws,
+            |reports, metadata| {
+                source_filter::filter_reports_with_compiler_loader(reports, metadata, |root| {
+                    assert_eq!(root, metadata.workspace_root.as_std_path());
+                    calls.set(calls.get() + 1);
+                    Ok(None)
+                })
+            },
+        )
+        .unwrap_err();
+        assert_eq!(calls.get(), 1);
+        assert_eq!(
+            error_cause::<crate::error::UnownedCoverageSourceError>(&error).path,
+            source.as_str()
+        );
+    }
+
+    #[test]
+    fn policy_filter_rejects_malformed_lcov_before_metadata_discovery() {
+        let input = "not lcov";
+        let error = filter_lcov_many_for_target_with_metadata_loader(&[input], None, None, |_| {
+            panic!("malformed LCOV must not discover workspace or target state")
+        })
+        .unwrap_err();
+        let _ = error_cause::<crate::error::ParseLcovError>(&error);
+        let cause = error_cause::<lcov::report::ParseError>(&error);
+        let expected = lcov::Report::from_reader(lcov::Reader::new(input.as_bytes())).unwrap_err();
+        assert_eq!(cause.to_string(), expected.to_string());
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore = "source filtering reads immutable checked-in fixtures")]
+    fn policy_reports_omit_zero_line_source_witnesses() {
+        let mut metadata = fixture_metadata();
+        metadata.packages[0].metadata = json!({"coverage-gate": {"min-lines-percent": 0}});
+        let source = metadata.workspace_root.join("member").join("src").join("test-include-root.rs");
+        let raw = format!("TN:\nSF:{source}\nDA:5,0\nend_of_record\n");
+        let ws = workspace::Workspace::from_metadata(&metadata, None).unwrap();
+        let sources = source_filter::filter_reports_with_metadata(source_filter::parse_reports(&[&raw]).unwrap(), &metadata).unwrap();
+        let witness = format!("TN:\nSF:{source}\nend_of_record\n");
+        assert_eq!(sources, [witness]);
+        let filtered = filter_reports_with_policy(source_filter::parse_reports(&[&raw]).unwrap(), &metadata, &ws).unwrap();
+        assert_eq!(filtered, [String::new()]);
     }
 
     fn assert_unknown_selector(error: &CoverageGateError, expected: &str) {
