@@ -416,7 +416,8 @@ pub fn filter_lcov_many(lcov_texts: &[&str], manifest_path: Option<&Path>) -> Re
 /// Returns [`CoverageGateError`] if any input is malformed or assigns different
 /// checksums to the same source line.
 pub fn merge_lcov(lcov_texts: &[&str]) -> Result<String, CoverageGateError> {
-    lcov_cov::merge_lcov(lcov_texts)
+    let reports = source_filter::parse_reports(lcov_texts)?;
+    lcov_cov::merge_lcov_reports(reports)
 }
 
 fn filter_lcov_with_metadata_loader(

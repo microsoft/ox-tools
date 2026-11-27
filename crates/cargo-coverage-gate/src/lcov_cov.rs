@@ -189,11 +189,10 @@ fn merge_line_coverage(merged: &mut LineCoverage, report: lcov::Report) -> Resul
     Ok(())
 }
 
-/// Merge LCOV inputs into one canonical line-level report.
-pub(crate) fn merge_lcov(inputs: &[&str]) -> Result<String, CoverageGateError> {
+/// Merge parsed LCOV reports into one canonical line-level report.
+pub(crate) fn merge_lcov_reports(reports: Vec<lcov::Report>) -> Result<String, CoverageGateError> {
     let mut merged = LineCoverage::new();
-    for input in inputs {
-        let report = lcov::Report::from_reader(lcov::Reader::new(input.as_bytes())).map_err(ParseLcovError::from)?;
+    for report in reports {
         merge_line_coverage(&mut merged, report)?;
     }
 
