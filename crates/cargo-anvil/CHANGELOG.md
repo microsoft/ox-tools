@@ -6,6 +6,7 @@
 
 - 🐛 Bug Fixes
 
+  - cargo-anvil: disable Codecov report discovery
   - cargo-coverage-gate: publish canonical merged LCOV
   - cargo-anvil: defer local coverage detection until setup
   - cargo-anvil: use workspace coverage gate during setup
@@ -15,6 +16,10 @@
 - ⚡ Performance
 
   - cargo-anvil: run lightweight checks workspace-wide ([#406](https://github.com/microsoft/ox-tools/pull/406))
+
+- ✔️ Tasks
+
+  - cargo-anvil: release v0.29.2 with coverage gate v0.7.7
 
 ## [0.29.1] - 2026-11-27
 
