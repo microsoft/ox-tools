@@ -139,10 +139,14 @@ mod writer_tests {
 /// than on restating the run's configuration.
 #[must_use]
 pub fn summary(mutants: &[Mutant], root: &Utf8Path) -> String {
+    summary_for_run(mutants, root, false)
+}
+
+pub(crate) fn summary_for_run(mutants: &[Mutant], root: &Utf8Path, excluded_diff: bool) -> String {
     let totals = Summary::of(mutants);
     let mut text = String::from("## Mutation testing\n\n");
 
-    // The headline is the score's own arithmetic, not a second opinion about it: the mutants
+    // When a score applies, the headline uses its own arithmetic: the mutants
     // counted as detected are exactly `Summary::detected`: mutants rejected by a failing
     // assertion. The total is `Summary::valid`, its denominator. Timeouts and memory exhaustion
     // remain in that denominator because no assertion rejected them.
@@ -155,12 +159,16 @@ pub fn summary(mutants: &[Mutant], root: &Utf8Path) -> String {
     let detected = totals.detected();
     let valid = totals.valid();
 
-    let _ = writeln!(
-        text,
-        "**Score {:.1}%** — {detected} detected, {} not detected of {valid} mutants.\n",
-        totals.score(),
-        valid - detected
-    );
+    if excluded_diff {
+        text.push_str("**Not applicable**: no eligible mutants remain after source and configuration exclusions.\n\n");
+    } else {
+        let _ = writeln!(
+            text,
+            "**Score {:.1}%** — {detected} detected, {} not detected of {valid} mutants.\n",
+            totals.score(),
+            valid - detected
+        );
+    }
 
     text.push_str("| Outcome | Count |\n|---|---:|\n");
 

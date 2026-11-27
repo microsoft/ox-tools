@@ -315,8 +315,12 @@ gate failed, and a campaign that could not obtain a complete answer:
 A run that selects no mutants succeeds, even with `--min-score` or `--max-flaky`
 configured, whether it is a full run or uses `--in-diff`. This applies to the final selection
 after combining all filters, such as `--exclude-file`, `--re` and sharding.
-A nonempty population consisting entirely of excluded or
-otherwise ungradeable mutants still fails the applicable gate, including with `--in-diff`. A partially
+An `--in-diff` population that contains only
+source- or configuration-excluded mutations also succeeds if none carries a source expectation.
+Its reports retain those exclusions. The command states that no eligible mutations remain and
+that mutation gates are not applicable. This is not a measured passing score.
+The GitHub Actions summary shows a not-applicable headline and retains the suppression counts.
+Other populations with no gradeable mutations still fail the applicable gate, including with `--in-diff`. A partially
 completed population fails when either `--min-score` or `--max-flaky` is configured; with no strict
 gate it remains a reportable result. Build convergence that leaves stuck mutants is still status
 `3`, because the selected population was not built completely enough to answer.
