@@ -224,6 +224,18 @@ fn coverage_is_one_domain_tool_invocation() {
 }
 
 #[test]
+fn codecov_uploads_the_canonical_merged_report_only() {
+    for workflow in [
+        include_str!("../templates/github/pr-impl-workflow.yml"),
+        include_str!("../templates/github/scheduled-impl-workflow.yml"),
+    ] {
+        assert!(workflow.contains("hashFiles('target/coverage/lcov-merged.info') != ''"));
+        assert!(workflow.contains("files: target/coverage/lcov-merged.info"));
+        assert!(!workflow.contains("files: target/coverage/lcov-all-features.info,target/coverage/lcov-no-default.info"));
+    }
+}
+
+#[test]
 fn coverage_setup_prefers_a_workspace_catalog_tool_before_external_installation() {
     let setup = include_str!("../templates/justfiles/anvil/setup/checks/llvm-cov.just");
     assert!(

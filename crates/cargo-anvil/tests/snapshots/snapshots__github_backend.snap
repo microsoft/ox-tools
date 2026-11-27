@@ -4089,13 +4089,14 @@ jobs:
           free-disk-space: true
           impact_mode: consume
       - name: Upload coverage to Codecov
-        # Upload every supported native slice so Codecov can union cfg-gated
-        # coverage. Windows ARM is excluded because its LLVM profiles are
-        # unusable. Require both feature-configuration reports.
-        if: always() && matrix.os != 'windows-arm' && hashFiles('target/coverage/lcov-all-features.info') != '' && hashFiles('target/coverage/lcov-no-default.info') != ''
+        # Upload the collector's canonical max-hit union so Codecov cannot
+        # override one feature configuration with another. Separate
+        # configuration reports remain available to the local gate.
+        # Windows ARM is excluded because its LLVM profiles are unusable.
+        if: always() && matrix.os != 'windows-arm' && hashFiles('target/coverage/lcov-merged.info') != ''
         uses: codecov/codecov-action@303a32d7a59b442fa8d48b6a1cc6825c09c847a5 # v7.1.1
         with:
-          files: target/coverage/lcov-all-features.info,target/coverage/lcov-no-default.info
+          files: target/coverage/lcov-merged.info
           flags: ${{ matrix.os }}
           token: ${{ secrets.CODECOV_TOKEN }}
           fail_ci_if_error: false
@@ -4429,11 +4430,11 @@ jobs:
           group: scheduled-test
           free-disk-space: true
       - name: Upload coverage to Codecov
-        # Upload both gated feature reports from every supported native slice.
-        if: always() && matrix.os != 'windows-arm' && hashFiles('target/coverage/lcov-all-features.info') != '' && hashFiles('target/coverage/lcov-no-default.info') != ''
+        # Upload the canonical max-hit union from every supported native slice.
+        if: always() && matrix.os != 'windows-arm' && hashFiles('target/coverage/lcov-merged.info') != ''
         uses: codecov/codecov-action@303a32d7a59b442fa8d48b6a1cc6825c09c847a5 # v7.1.1
         with:
-          files: target/coverage/lcov-all-features.info,target/coverage/lcov-no-default.info
+          files: target/coverage/lcov-merged.info
           flags: scheduled,${{ matrix.os }}
           token: ${{ secrets.CODECOV_TOKEN }}
           fail_ci_if_error: false

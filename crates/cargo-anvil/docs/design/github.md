@@ -171,11 +171,14 @@ sizes while retaining coverage line information. Keeping both profiles aligned
 also keeps nested Cargo builds and nextest binary inventories consistent.
 These overrides apply only to the GitHub test-group steps.
 
-PR and scheduled test jobs upload the same released-surface-filtered LCOV
-files evaluated by the local gate. Both `lcov-all-features.info` and
-`lcov-no-default.info` must exist; completed reports can upload after a group
-failure. Windows ARM is excluded because its LLVM profiles are unusable.
-Uploads carry per-OS flags, plus `scheduled` for scheduled runs.
+PR and scheduled test jobs upload the released-surface-filtered
+`lcov-merged.info` report. It uses the maximum hit count for each source line
+across feature configurations, matching the local gate's union semantics while
+preventing one input from replacing another inside Codecov. The separate
+`lcov-all-features.info` and `lcov-no-default.info` files remain available to
+the local gate and can exist after a group failure. Windows ARM is excluded
+because its LLVM profiles are unusable. Uploads carry per-OS flags, plus
+`scheduled` for scheduled runs.
 
 Both reusable workflows accept optional `CODECOV_TOKEN`, forwarded by the
 default roots. Configure it for repositories requiring authenticated uploads.

@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitCode, Output, Stdio};
 use std::{env, fs, io};
 
-use cargo_coverage_gate::{CoverageGateError, filter_lcov_many};
+use cargo_coverage_gate::{CoverageGateError, filter_lcov_many, merge_lcov};
 use cargo_metadata::{Metadata, MetadataCommand};
 use ohno::{AppError, EnrichableExt as _, IntoAppError};
 use semver::Version;
@@ -807,16 +807,32 @@ fn filter_and_publish_reports_with_reader(
         let manifest = execution.workspace.root.join("Cargo.toml");
         filter(&raw_refs, &manifest)?
     };
-    publish_reports(collected.iter().enumerate().map(|(index, report)| {
-        let contents = published
-            .get(index)
-            .expect("raw publication and filter_lcov_many preserve one output for every input tracefile");
-        (
-            report.stable_path.as_path(),
-            format!("{}-published.info", report.configuration.artifact_name()),
-            contents.as_str(),
-        )
-    }))?;
+    let merged = merge_lcov(&published.iter().map(String::as_str).collect::<Vec<_>>())
+        .into_app_err("failed to merge filtered LCOV reports for publication")?;
+    let mut reports = collected
+        .iter()
+        .enumerate()
+        .map(|(index, report)| {
+            let contents = published
+                .get(index)
+                .expect("raw publication and filter_lcov_many preserve one output for every input tracefile");
+            (
+                report.stable_path.clone(),
+                format!("{}-published.info", report.configuration.artifact_name()),
+                contents.clone(),
+            )
+        })
+        .collect::<Vec<_>>();
+    reports.push((
+        execution.args.coverage_dir.join("lcov-merged.info"),
+        "merged-published.info".to_owned(),
+        merged,
+    ));
+    publish_reports(
+        reports
+            .iter()
+            .map(|(path, label, contents)| (path.as_path(), label.clone(), contents.as_str())),
+    )?;
     Ok(collected.iter().map(|report| report.stable_path.clone()).collect())
 }
 
@@ -2225,6 +2241,7 @@ mod tests {
         ];
         fs::write(&collected[0].stable_path, "old all").expect("write old all");
         fs::write(&collected[1].stable_path, "old no-default").expect("write old no-default");
+        fs::write(coverage.join("lcov-merged.info"), "old merged").expect("write old merged");
 
         let paths = filter_and_publish_reports_with_reader(
             &execution,
@@ -2239,16 +2256,21 @@ mod tests {
             |raw, manifest| {
                 assert_eq!(raw, [RAW_ALL_FEATURES, RAW_NO_DEFAULT]);
                 assert_eq!(manifest, tmp.path().join("Cargo.toml"));
-                Ok(vec!["filtered all".to_owned(), "filtered no-default".to_owned()])
+                Ok(vec![RAW_ALL_FEATURES.to_owned(), RAW_NO_DEFAULT.to_owned()])
             },
         )
         .expect("filter and publish");
 
         assert_eq!(paths, collected.iter().map(|report| report.stable_path.clone()).collect::<Vec<_>>());
-        assert_eq!(fs::read_to_string(&collected[0].stable_path).expect("read all"), "filtered all");
+        assert_eq!(fs::read_to_string(&collected[0].stable_path).expect("read all"), RAW_ALL_FEATURES);
         assert_eq!(
             fs::read_to_string(&collected[1].stable_path).expect("read no-default"),
-            "filtered no-default"
+            RAW_NO_DEFAULT
+        );
+        let merged = fs::read_to_string(coverage.join("lcov-merged.info")).expect("read merged LCOV");
+        assert_eq!(
+            merged,
+            cargo_coverage_gate::merge_lcov(&[RAW_ALL_FEATURES, RAW_NO_DEFAULT]).expect("merge the exact filtered inputs")
         );
         assert!(fs::read_dir(&coverage).expect("read coverage directory").all(|entry| {
             !entry
@@ -2349,7 +2371,7 @@ mod tests {
             &execution,
             &parentless,
             |_| Ok(RAW_ALL_FEATURES.to_owned()),
-            |_, _| Ok(vec!["filtered".to_owned()]),
+            |_, _| Ok(vec![RAW_ALL_FEATURES.to_owned()]),
         )
         .expect_err("parentless stable LCOV path must fail");
         assert_eq!(
@@ -2397,7 +2419,7 @@ mod tests {
             &execution,
             &collected,
             |_| Ok(RAW_ALL_FEATURES.to_owned()),
-            |_, _| Ok(vec!["filtered".to_owned()]),
+            |_, _| Ok(vec![RAW_ALL_FEATURES.to_owned()]),
         )
         .expect_err("missing staging directory must fail");
         assert!(error.to_string().contains("failed to create temporary file"), "{error}");

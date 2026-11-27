@@ -98,8 +98,11 @@ The optional `run` mode keeps collection and evaluation separated internally:
    feature-only gates, and `cfg(not(test))` remain.
 6. The filtered LCOV is staged beside its stable per-configuration path under
    `--coverage-dir` and renamed into place only after complete filtering. The
-   evaluator reads those exact stable files, so callers can give Codecov and
-   Azure DevOps byte-identical released-surface reports.
+   evaluator reads the separate stable configuration files. The same filtered
+   batch is also merged with maximum per-line hit counts and published as
+   `lcov-merged.info`, after the individual reports have all completed. This is
+   the canonical hosted-reporting artifact and has the same line coverage as
+   multi-input evaluation.
    `no-default-features` maps to `lcov-no-default.info`.
 
 The Windows response-file retry also writes only to scratch. Successful retry
