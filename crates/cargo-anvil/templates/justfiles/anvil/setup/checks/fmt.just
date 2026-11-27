@@ -6,8 +6,8 @@
 
 # Install prerequisites for the `anvil-fmt` recipe.
 [private]
-anvil-fmt-setup installer="install": anvil-component-nightly-rustfmt-install (anvil-tool-cargo-each-install installer)
+anvil-fmt-setup installer="install": anvil-component-nightly-rustfmt-install
 
 # Validate prerequisites for the `anvil-fmt` recipe.
 [private]
-anvil-fmt-validate-prereqs: anvil-component-nightly-rustfmt-validate-prereqs anvil-tool-cargo-each-validate-prereqs
+anvil-fmt-validate-prereqs: anvil-component-nightly-rustfmt-validate-prereqs

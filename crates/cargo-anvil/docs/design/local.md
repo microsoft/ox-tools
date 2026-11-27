@@ -56,7 +56,9 @@ just anvil-full
 Individual checks compose into groups, then tiers. `anvil-pr-slow` runs the
 test, MSRV, runtime-analysis, fuzzing, and mutation groups sequentially.
 CI can run those groups in parallel. Scheduled groups and the scheduled/full
-tiers always cover the full workspace; PR checks use impact scoping.
+tiers always cover the full workspace; expensive PR checks use impact scoping.
+Lightweight formatting, manifest sorting, and license-header checks always run
+over their full workspace/input domain, including for an empty impact set.
 
 `just --list` shows checks, groups, tiers, development commands, setup, and
 container commands. Scoped setup and validation recipes are hidden from the

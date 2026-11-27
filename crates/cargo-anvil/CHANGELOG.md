@@ -2,11 +2,18 @@
 
 ## [Unreleased]
 
-## [0.29.1] - 2026-11-27
+## [0.29.2] - 2026-11-27
 
 - 🐛 Bug Fixes
 
+  - cargo-anvil: reconcile catalog release with main
   - cargo-anvil: remove non-container PowerShell dependency
+
+## [0.29.1] - 2026-11-27
+
+- ✨ Features
+
+  - cargo-anvil: guard publishable crates against test features ([#385](https://github.com/microsoft/ox-tools/pull/385))
 
 - ✔️ Tasks
 

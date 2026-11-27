@@ -73,8 +73,8 @@ anvil-cargo-hack: anvil-cargo-hack-validate-prereqs anvil-impact
     cargo each {{ anvil_required_selection }} --once -- cargo {{ anvil_stable_toolchain_arg }} hack '{packages}' --feature-powerset --depth 2 check
 
 # Verify Cargo manifests are sorted and formatted consistently.
-anvil-cargo-sort: anvil-cargo-sort-validate-prereqs anvil-impact
-    cargo each {{ anvil_modified_selection }} --once -- cargo {{ anvil_stable_toolchain_arg }} sort --workspace --grouped --check --check-format
+anvil-cargo-sort: anvil-cargo-sort-validate-prereqs
+    cargo each --workspace --once -- cargo {{ anvil_stable_toolchain_arg }} sort --workspace --grouped --check --check-format
 
 # Compile each affected package independently with and without default features.
 anvil-check-all-targets: anvil-check-all-targets-validate-prereqs anvil-impact
@@ -126,15 +126,15 @@ anvil-examples package="" example="" timeout="30": anvil-examples-validate-prere
 anvil-external-types: anvil-external-types-validate-prereqs anvil-impact
     cargo +{{ rust_nightly_external_types }} each {{ anvil_affected_selection }} --filter target-kind:lib --keep-going -- cargo +{{ rust_nightly_external_types }} check-external-types --manifest-path '{manifest}'
 
-# Check or fix Rust formatting for modified workspace packages.
+# Check or fix Rust formatting across the workspace.
 [group("anvil")]
 [arg("fix", long, value="true")]
-anvil-fmt fix="false": anvil-fmt-validate-prereqs anvil-impact
-    cargo +{{ rust_nightly }} each {{ anvil_modified_selection }} --keep-going -- cargo +{{ rust_nightly }} fmt --manifest-path '{manifest}' {{ if fix == "true" { "" } else { "--check" } }}
+anvil-fmt fix="false": anvil-fmt-validate-prereqs
+    cargo +{{ rust_nightly }} fmt --all {{ if fix == "true" { "" } else { "--check" } }}
 
 # Verify source files carry the required license header.
-anvil-license-headers: anvil-license-headers-validate-prereqs anvil-impact
-    cargo each {{ anvil_modified_selection }} --once -- cargo {{ anvil_stable_toolchain_arg }} heather
+anvil-license-headers: anvil-license-headers-validate-prereqs
+    cargo each --workspace --once -- cargo {{ anvil_stable_toolchain_arg }} heather
 
 # Run affected tests and enforce coverage policy in supported feature modes.
 anvil-llvm-cov: anvil-llvm-cov-validate-prereqs anvil-impact
@@ -2898,11 +2898,11 @@ anvil-external-types-validate-prereqs: anvil-toolchain-nightly-external-types-va
 
 # Install prerequisites for the `anvil-fmt` recipe.
 [private]
-anvil-fmt-setup installer="install": anvil-component-nightly-rustfmt-install (anvil-tool-cargo-each-install installer)
+anvil-fmt-setup installer="install": anvil-component-nightly-rustfmt-install
 
 # Validate prerequisites for the `anvil-fmt` recipe.
 [private]
-anvil-fmt-validate-prereqs: anvil-component-nightly-rustfmt-validate-prereqs anvil-tool-cargo-each-validate-prereqs
+anvil-fmt-validate-prereqs: anvil-component-nightly-rustfmt-validate-prereqs
 
 # Install prerequisites for the `anvil-license-headers` recipe.
 [group("anvil-setup")]
