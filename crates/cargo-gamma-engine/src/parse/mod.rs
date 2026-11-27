@@ -39,3 +39,27 @@ pub(crate) use source_file::shebang_as_whitespace;
 pub use source_file::{BOM, strip_bom};
 #[doc(inline)]
 pub use source_file::{SourceFile, exceeds_nesting_limit, without_bom};
+
+/// Configurable nesting budgets for small integration-test inputs.
+#[cfg(feature = "test-util")]
+pub mod test_util {
+    use camino::Utf8PathBuf;
+
+    use super::{SourceFile, source_file};
+    use crate::Result;
+
+    /// Checks the normal source precheck against an explicit test budget.
+    #[must_use]
+    pub fn exceeds_nesting_limit(text: &str, limit: usize) -> bool {
+        source_file::exceeds_nesting_limit_with_limit(text, limit)
+    }
+
+    /// Parses through the normal source pipeline with an explicit test budget.
+    ///
+    /// # Errors
+    ///
+    /// Returns the ordinary parse or nesting diagnostic for this input and budget.
+    pub fn parse(path: impl Into<Utf8PathBuf>, text: String, limit: usize) -> Result<SourceFile> {
+        SourceFile::parse_with_limit(path.into(), text, limit)
+    }
+}

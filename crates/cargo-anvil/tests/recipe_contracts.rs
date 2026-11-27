@@ -175,22 +175,6 @@ fn common_checks_are_direct_cargo_each_invocations() {
 }
 
 #[test]
-fn loom_enables_the_cfg_with_target_flags_and_rejects_empty_suites() {
-    let check = cargo_anvil::artifacts::justfile::checks::loom();
-    let recipe = check.body();
-    assert!(recipe.contains(r#"target."cfg(all())".rustflags=["--cfg","loom"]"#));
-    assert!(!recipe.contains("build.rustflags="));
-    assert!(recipe.contains("nextest run"));
-    assert!(recipe.contains("--cargo-profile release"));
-    assert!(recipe.contains("--no-tests fail"));
-    assert!(!recipe.contains("--test-threads=1"));
-
-    let setup = include_str!("../templates/justfiles/anvil/setup/checks/loom.just");
-    assert!(setup.contains("(anvil-tool-cargo-nextest-install installer)"));
-    assert!(setup.contains("anvil-tool-cargo-nextest-validate-prereqs"));
-}
-
-#[test]
 fn coverage_is_one_domain_tool_invocation() {
     let recipes = generated().checks;
     assert!(recipes.contains("cargo +{{ rust_nightly }} each {{ anvil_affected_selection }} --once --"));

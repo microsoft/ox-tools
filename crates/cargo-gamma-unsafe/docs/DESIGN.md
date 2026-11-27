@@ -108,11 +108,18 @@ killed.
 The dedicated Loom target exposes each signal-registry and cgroup model as
 an independent test. Models retain exhaustive exploration and fresh state per
 execution; the runner can execute them concurrently and report their durations
-separately. The model registry has one process-group slot and one cgroup slot:
+separately. Each model has two actors: the model's main thread and one worker,
+without an extra observer thread adding scheduler interleavings. The model
+registry has one process-group slot and one cgroup slot:
 each scenario registers at most one of each. Native tests retain the production
 registry capacity and multi-slot cases. Witnesses observed only after joining
-workers use worker return values rather than additional modeled locks or atomics. Mid-operation lifetime
-and cleanup-order witnesses remain shared and modeled.
+workers use worker return values rather than additional modeled locks or
+atomics. Mid-operation lifetime and cleanup-order witnesses remain shared and
+modeled. Models assert the returned signals, slot identities, and ownership
+state as well as their race invariants.
+Standard `Arc` owns each fixture until both actors finish; its reference-count
+implementation is not part of the production registry protocol. Shared
+protocol atomics and cross-actor lifetime observations remain Loom-controlled.
 
 Cgroup registration and release use the same owning-file path in production
 and deterministic tests. A cgroup retains the exact registry that accepted its

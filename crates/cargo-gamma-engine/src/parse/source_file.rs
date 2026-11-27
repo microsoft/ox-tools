@@ -51,12 +51,16 @@ pub struct SourceFile {
 #[doc(hidden)]
 #[must_use]
 pub fn exceeds_nesting_limit(text: &str) -> bool {
+    exceeds_nesting_limit_with_limit(text, nesting::NESTING_LIMIT)
+}
+
+pub(super) fn exceeds_nesting_limit_with_limit(text: &str, limit: usize) -> bool {
     let text = strip_bom(text);
     let parsed = shebang_as_whitespace(text);
     let lines = line_starts(text);
     let comments = comment::scan_comments(&parsed, &lines);
 
-    nesting::beyond(&parsed, &comments, nesting::NESTING_LIMIT).is_some()
+    nesting::beyond(&parsed, &comments, limit).is_some()
 }
 
 /// Keeps the parser's byte offsets aligned while hiding a script's interpreter line.
@@ -102,7 +106,10 @@ impl SourceFile {
     /// [`NESTING_LIMIT`](nesting::NESTING_LIMIT) — see that constant for why a file can be too
     /// deep to look at.
     pub fn parse(path: impl Into<Utf8PathBuf>, text: String) -> Result<Self> {
-        let path = path.into();
+        Self::parse_with_limit(path.into(), text, nesting::NESTING_LIMIT)
+    }
+
+    pub(super) fn parse_with_limit(path: Utf8PathBuf, text: String, limit: usize) -> Result<Self> {
         let had_bom = text.starts_with(BOM);
         let text = without_bom(text);
         let parsed = shebang_as_whitespace(&text);
@@ -111,7 +118,7 @@ impl SourceFile {
 
         // Before `syn`, deliberately. The parser is the first of the recursive descents over this
         // text and the guard is worth nothing after one of them has already run out of stack.
-        if let Some(at) = nesting::beyond(&parsed, &comments, nesting::NESTING_LIMIT) {
+        if let Some(at) = nesting::beyond(&parsed, &comments, limit) {
             let line = lines.partition_point(|start| *start <= at);
 
             // Skippable, because this is the one parse failure that says nothing about whether the
@@ -123,7 +130,7 @@ impl SourceFile {
             return Err(error!(
                 "{}:{line}: nests deeper than {} levels of brackets, prefix operators, chained operators or postfix expressions",
                 encode_controls(path.as_str()),
-                nesting::NESTING_LIMIT
+                limit
             )
             .skippable());
         }

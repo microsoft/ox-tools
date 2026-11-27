@@ -1621,8 +1621,8 @@ mod tests {
 #[cfg(loom)]
 pub(crate) mod loom_models {
     use core::cell::Cell;
+    use std::sync::Arc;
 
-    use loom::sync::Arc;
     use loom::sync::atomic::{AtomicBool, Ordering};
 
     use super::Registry;
@@ -1633,22 +1633,26 @@ pub(crate) mod loom_models {
     pub fn extracted_kills_finish_before_release_reap_and_reuse() {
         loom::model(|| {
             let registry = Arc::new(Registry::new());
-            let slot = registry.claim(PROCESS_GROUP, &|_| {}).expect("free slot");
+            let slot = registry
+                .claim(PROCESS_GROUP, &|group| panic!("unexpected kill of {group}"))
+                .expect("a fresh registry has a free process-group slot");
+            assert_eq!(slot, 0);
             let reused = Arc::new(AtomicBool::new(false));
             let sweeping = {
                 let registry = Arc::clone(&registry);
                 let reused = Arc::clone(&reused);
                 loom::thread::spawn(move || {
-                    let _fatal = registry.interrupt(libc::SIGINT, &|group| {
+                    let fatal = registry.interrupt(libc::SIGINT, &|group| {
                         assert_eq!(group, PROCESS_GROUP);
                         loom::thread::yield_now();
                         assert!(!reused.load(Ordering::SeqCst), "kill used an identity after release/reap/reuse");
                     });
+                    assert_eq!(fatal, Some(libc::SIGINT));
                 })
             };
             registry.release(slot, PROCESS_GROUP);
             reused.store(true, Ordering::SeqCst);
-            sweeping.join().expect("sweep thread");
+            sweeping.join().expect("a sweep worker panic indicates a violated model invariant");
         });
     }
 
@@ -1656,7 +1660,10 @@ pub(crate) mod loom_models {
     pub fn extracted_cgroup_writes_finish_before_descriptor_close_and_reuse() {
         loom::model(|| {
             let registry = Arc::new(Registry::new());
-            let slot = registry.claim_cgroup(17, &|_| {}).expect("free descriptor slot");
+            let slot = registry
+                .claim_cgroup(17, &|descriptor| panic!("unexpected kill descriptor {descriptor}"))
+                .expect("a fresh registry has a free cgroup slot");
+            assert_eq!(slot, 0);
             // SeqCst orders only this model witness's observations. It neither publishes nor
             // protects descriptor state: registry release/quiescence must prevent late writes.
             let closed = Arc::new(AtomicBool::new(false));
@@ -1664,63 +1671,77 @@ pub(crate) mod loom_models {
                 let registry = Arc::clone(&registry);
                 let closed = Arc::clone(&closed);
                 loom::thread::spawn(move || {
-                    let _fatal = registry.interrupt_with(libc::SIGINT, &|_| {}, &|descriptor| {
+                    let fatal = registry.interrupt_with(libc::SIGINT, &|group| panic!("unexpected kill of {group}"), &|descriptor| {
                         assert_eq!(descriptor, 17);
                         loom::thread::yield_now();
                         assert!(!closed.load(Ordering::SeqCst), "signal wrote through a closed or reused descriptor");
                     });
+                    assert_eq!(fatal, Some(libc::SIGINT));
                 })
             };
             registry.release_cgroup(slot, 17);
             closed.store(true, Ordering::SeqCst);
-            sweeping.join().expect("signal sweep thread");
+            sweeping.join().expect("a sweep worker panic indicates a violated model invariant");
         });
     }
 
     pub fn only_the_final_cleanup_owner_can_take_fatal_responsibility() {
+        fn cleanup(registry: &Registry, groups_done: &AtomicBool, cgroups_done: &AtomicBool, closing: bool) -> Option<i32> {
+            let kill = |group| {
+                assert_eq!(group, PROCESS_GROUP);
+                loom::thread::yield_now();
+                groups_done.store(true, Ordering::SeqCst);
+            };
+            let kill_cgroup = |descriptor| {
+                assert_eq!(descriptor, 17);
+                loom::thread::yield_now();
+                cgroups_done.store(true, Ordering::SeqCst);
+            };
+            let fatal = if closing {
+                registry.close_with(&kill, &kill_cgroup)
+            } else {
+                registry.interrupt_with(libc::SIGINT, &kill, &kill_cgroup)
+            };
+            assert_eq!(
+                fatal.filter(|_| !groups_done.load(Ordering::SeqCst) || !cgroups_done.load(Ordering::SeqCst)),
+                None,
+                "fatal responsibility preceded completion of group and cgroup cleanup"
+            );
+            fatal
+        }
+
         for final_close in [false, true] {
             loom::model(move || {
                 let registry = Arc::new(Registry::new());
-                let _slot = registry.claim(PROCESS_GROUP, &|_| {}).expect("free slot");
+                let slot = registry
+                    .claim(PROCESS_GROUP, &|group| panic!("unexpected kill of {group}"))
+                    .expect("a fresh registry has a free process-group slot");
+                assert_eq!(slot, 0);
                 registry.cgroups[0].store(18, Ordering::SeqCst);
                 if final_close {
                     registry.open();
                 }
                 let groups_done = Arc::new(AtomicBool::new(false));
                 let cgroups_done = Arc::new(AtomicBool::new(false));
-                let mut threads = Vec::new();
-                for closing in [false, final_close] {
+                let sweeping = {
                     let registry = Arc::clone(&registry);
                     let groups_done = Arc::clone(&groups_done);
                     let cgroups_done = Arc::clone(&cgroups_done);
-                    threads.push(loom::thread::spawn(move || {
-                        let kill = |group| {
-                            assert_eq!(group, PROCESS_GROUP);
-                            loom::thread::yield_now();
-                            groups_done.store(true, Ordering::SeqCst);
-                        };
-                        let kill_cgroup = |descriptor| {
-                            assert_eq!(descriptor, 17);
-                            loom::thread::yield_now();
-                            cgroups_done.store(true, Ordering::SeqCst);
-                        };
-                        let fatal = if closing {
-                            registry.close_with(&kill, &kill_cgroup)
-                        } else {
-                            registry.interrupt_with(libc::SIGINT, &kill, &kill_cgroup)
-                        };
-                        if fatal.is_some() {
-                            assert!(groups_done.load(Ordering::SeqCst), "fatal before the extracted group kill");
-                            assert!(cgroups_done.load(Ordering::SeqCst), "fatal before the extracted cgroup kill");
-                        }
-                        fatal.is_some()
-                    }));
+                    loom::thread::spawn(move || cleanup(&registry, &groups_done, &cgroups_done, false))
+                };
+                let main_fatal = cleanup(&registry, &groups_done, &cgroups_done, final_close);
+                let worker_fatal = sweeping
+                    .join()
+                    .expect("a cleanup worker panic indicates a violated model invariant");
+                let mut fatalities = 0;
+                for signal in [main_fatal, worker_fatal].into_iter().flatten() {
+                    assert_eq!(signal, libc::SIGINT);
+                    fatalities += 1;
                 }
-                let fatalities = threads
-                    .into_iter()
-                    .map(|thread| usize::from(thread.join().expect("cleanup owner")))
-                    .sum::<usize>();
                 assert!(fatalities >= 1, "fatal responsibility was lost");
+                if final_close {
+                    assert_eq!(fatalities, 1, "only the final owner may accept deferred fatal responsibility");
+                }
             });
         }
     }
@@ -1738,29 +1759,21 @@ pub(crate) mod loom_models {
                         killed.set(true);
                     };
 
-                    assert!(registry.claim(PROCESS_GROUP, &kill).is_some());
+                    assert_eq!(registry.claim(PROCESS_GROUP, &kill), Some(0));
                     killed.get()
                 })
             };
-            let sweeping = {
-                let registry = Arc::clone(&registry);
-                loom::thread::spawn(move || {
-                    let killed = Cell::new(false);
-                    let kill = |group| {
-                        assert_eq!(group, PROCESS_GROUP);
-                        killed.set(true);
-                    };
-
-                    assert_eq!(registry.interrupt(libc::SIGINT, &kill), Some(libc::SIGINT));
-                    killed.get()
-                })
+            let killed_on_sweep = Cell::new(false);
+            let kill = |group| {
+                assert_eq!(group, PROCESS_GROUP);
+                killed_on_sweep.set(true);
             };
+            assert_eq!(registry.interrupt(libc::SIGINT, &kill), Some(libc::SIGINT));
 
-            let killed_on_claim = claiming.join().expect("claim thread");
-            let killed_on_sweep = sweeping.join().expect("sweep thread");
+            let killed_on_claim = claiming.join().expect("a claim worker panic indicates a violated model invariant");
 
             assert!(
-                killed_on_claim || killed_on_sweep,
+                killed_on_claim || killed_on_sweep.get(),
                 "the claimed group escaped both sides of the protocol"
             );
         });
@@ -1780,32 +1793,6 @@ pub(crate) mod loom_models {
         loom::model(|| {
             let registry = Arc::new(Registry::new());
 
-            let spawning = {
-                let registry = Arc::clone(&registry);
-                loom::thread::spawn(move || {
-                    let killed = Cell::new(false);
-                    let kill = |group| {
-                        assert_eq!(group, PROCESS_GROUP);
-                        killed.set(true);
-                    };
-
-                    registry.open();
-
-                    // Interruption-driven termination may occur at the next instruction, so no
-                    // child may be created after the signal is observed.
-                    let created = if registry.signal() == super::CALM {
-                        assert!(registry.claim(PROCESS_GROUP, &kill).is_some(), "a registry of free slots");
-
-                        true
-                    } else {
-                        false
-                    };
-
-                    let _death = registry.close(&kill);
-
-                    (created, killed.get())
-                })
-            };
             let handling = {
                 let registry = Arc::clone(&registry);
                 loom::thread::spawn(move || {
@@ -1815,17 +1802,34 @@ pub(crate) mod loom_models {
                         killed.set(true);
                     };
 
-                    let _death = registry.interrupt(libc::SIGINT, &kill);
-                    killed.get()
+                    (registry.interrupt(libc::SIGINT, &kill), killed.get())
                 })
             };
 
-            let (created, killed_on_spawn) = spawning.join().expect("spawn thread");
-
-            let killed_on_interrupt = handling.join().expect("handler thread");
+            let killed_on_spawn = Cell::new(false);
+            let kill = |group| {
+                assert_eq!(group, PROCESS_GROUP);
+                killed_on_spawn.set(true);
+            };
+            registry.open();
+            let created = registry.signal() == super::CALM;
+            if created {
+                assert_eq!(registry.claim(PROCESS_GROUP, &kill), Some(0));
+            }
+            let spawn_fatal = registry.close(&kill);
+            let (handler_fatal, killed_on_interrupt) = handling
+                .join()
+                .expect("a handler worker panic indicates a violated model invariant");
+            assert!(
+                matches!(
+                    (spawn_fatal, handler_fatal),
+                    (Some(libc::SIGINT), None | Some(libc::SIGINT)) | (None, Some(libc::SIGINT))
+                ),
+                "the signal must retain a re-raise owner"
+            );
 
             assert!(
-                !created || killed_on_spawn || killed_on_interrupt,
+                !created || killed_on_spawn.get() || killed_on_interrupt,
                 "a child created during an interrupt was left running by both sides"
             );
         });
@@ -1840,35 +1844,30 @@ pub(crate) mod loom_models {
         loom::model(|| {
             let registry = Arc::new(Registry::new());
 
-            let spawning = {
-                let registry = Arc::clone(&registry);
-                loom::thread::spawn(move || {
-                    let kill = |group| assert_eq!(group, PROCESS_GROUP);
-
-                    registry.open();
-
-                    if registry.signal() == super::CALM {
-                        let _slot = registry.claim(PROCESS_GROUP, &kill);
-                    }
-
-                    // A window that was open when the handler ran owns the deferred re-raise.
-                    registry.close(&kill).is_some()
-                })
-            };
             let handling = {
                 let registry = Arc::clone(&registry);
                 loom::thread::spawn(move || {
                     let kill = |group| assert_eq!(group, PROCESS_GROUP);
 
-                    registry.interrupt(libc::SIGINT, &kill).is_some()
+                    registry.interrupt(libc::SIGINT, &kill)
                 })
             };
 
-            let spawn_reraises = spawning.join().expect("spawn thread");
-            let handler_reraises = handling.join().expect("handler thread");
+            let kill = |group| assert_eq!(group, PROCESS_GROUP);
+            registry.open();
+            if registry.signal() == super::CALM {
+                assert_eq!(registry.claim(PROCESS_GROUP, &kill), Some(0));
+            }
+            let spawn_fatal = registry.close(&kill);
+            let handler_fatal = handling
+                .join()
+                .expect("a handler worker panic indicates a violated model invariant");
 
             assert!(
-                spawn_reraises || handler_reraises,
+                matches!(
+                    (spawn_fatal, handler_fatal),
+                    (Some(libc::SIGINT), None | Some(libc::SIGINT)) | (None, Some(libc::SIGINT))
+                ),
                 "neither side accepted responsibility for re-raising the terminal signal"
             );
         });

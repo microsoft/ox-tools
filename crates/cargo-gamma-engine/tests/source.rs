@@ -6,7 +6,7 @@
 
 use cargo_gamma_engine::ops::collect::{collect, into_definitions};
 use cargo_gamma_engine::ops::registry::Selection;
-use cargo_gamma_engine::parse::nesting::{CHAIN_FACTOR, NESTING_LIMIT};
+use cargo_gamma_engine::parse::nesting::NESTING_LIMIT;
 use cargo_gamma_engine::parse::{SourceFile, exceeds_nesting_limit};
 use cargo_gamma_engine::schema::{AssignedMutant, Ordinal, instrument};
 
@@ -51,8 +51,11 @@ fn shebang_spans_and_instrumentation_preserve_the_interpreter_line() {
 }
 
 #[test]
+#[cfg_attr(
+    miri,
+    ignore = "native parser stress; small_operand_keyword_budget runs the same guard with a small test-util limit"
+)]
 fn operand_keywords_are_bounded_before_recursive_parsing() {
-    let repetitions = if cfg!(miri) { NESTING_LIMIT * CHAIN_FACTOR + 1 } else { 1000 };
     for keyword in [
         "return ",
         "break ",
@@ -62,19 +65,30 @@ fn operand_keywords_are_bounded_before_recursive_parsing() {
         "yield ",
         "become ",
     ] {
-        let deep = format!("fn f() {{ {}1 }}", keyword.repeat(repetitions));
+        let deep = format!("fn f() {{ {}1 }}", keyword.repeat(1000));
         assert!(exceeds_nesting_limit(&deep), "{keyword}");
-        assert!(SourceFile::parse("deep.rs", deep).unwrap_err().is_skippable());
+        let error = SourceFile::parse("deep.rs", deep).unwrap_err();
+        assert!(error.is_skippable());
+        assert!(!error.is_usage());
+        assert_eq!(
+            error.to_string(),
+            format!(
+                "deep.rs:1: nests deeper than {NESTING_LIMIT} levels of brackets, prefix operators, chained operators or postfix expressions"
+            )
+        );
         assert!(!exceeds_nesting_limit(&format!("fn f() {{ {}1 }}", keyword.repeat(8))));
     }
 
-    assert!(!exceeds_nesting_limit(&"fn f() { return_value(); }".repeat(repetitions)));
+    assert!(!exceeds_nesting_limit(&"fn f() { return_value(); }".repeat(1000)));
 }
 
 #[test]
+#[cfg_attr(
+    miri,
+    ignore = "native parser stress; small_bom_and_shebang_budget covers normalization under Miri"
+)]
 fn bom_and_shebang_are_normalized_before_both_nesting_checks() {
-    let repetitions = if cfg!(miri) { NESTING_LIMIT * CHAIN_FACTOR + 1 } else { 1000 };
-    let interpreter = format!("#!/{}{}", "(".repeat(repetitions), "return ".repeat(repetitions));
+    let interpreter = format!("#!/{}{}", "(".repeat(1000), "return ".repeat(1000));
     for ending in ["\n", "\r\n", ""] {
         let body = if ending.is_empty() { "" } else { "fn f() {}" };
         let text = format!("\u{feff}{interpreter}{ending}{body}");
@@ -85,7 +99,71 @@ fn bom_and_shebang_are_normalized_before_both_nesting_checks() {
             Some(format!("{interpreter}{}", ending.trim_end_matches('\n')).as_str())
         );
     }
-    let deep = format!("\u{feff}#!/x\nfn f() {{ {}1 }}", "return ".repeat(repetitions));
+
+    let deep = format!("\u{feff}#!/x\nfn f() {{ {}1 }}", "return ".repeat(1000));
     assert!(exceeds_nesting_limit(&deep));
-    assert!(SourceFile::parse("deep.rs", deep).unwrap_err().is_skippable());
+    let error = SourceFile::parse("deep.rs", deep).unwrap_err();
+    assert!(error.is_skippable());
+    assert!(!error.is_usage());
+    assert_eq!(
+        error.to_string(),
+        format!(
+            "deep.rs:2: nests deeper than {NESTING_LIMIT} levels of brackets, prefix operators, chained operators or postfix expressions"
+        )
+    );
+}
+
+#[cfg(feature = "test-util")]
+#[test]
+fn small_operand_keyword_budget() {
+    use cargo_gamma_engine::parse::test_util;
+
+    let keywords: &[&str] = if cfg!(miri) {
+        &["break 'x "]
+    } else {
+        &[
+            "return ",
+            "break ",
+            "break 'out ",
+            "break /* label */ 'out /* value */ ",
+            "break 'r#out ",
+            "yield ",
+            "become ",
+        ]
+    };
+    for keyword in keywords {
+        let boundary = format!("fn f() {{ {}1 }}", keyword.repeat(4));
+        let overflow = format!("fn f() {{ {}1 }}", keyword.repeat(5));
+        assert!(!test_util::exceeds_nesting_limit(&boundary, 2));
+        assert!(test_util::exceeds_nesting_limit(&overflow, 2));
+        let error = test_util::parse("deep.rs", overflow, 2).unwrap_err();
+        assert!(error.is_skippable());
+        assert!(!error.is_usage());
+        assert_eq!(
+            error.to_string(),
+            "deep.rs:1: nests deeper than 2 levels of brackets, prefix operators, chained operators or postfix expressions"
+        );
+    }
+    assert!(!test_util::exceeds_nesting_limit("return_value", 2));
+}
+
+#[cfg(feature = "test-util")]
+#[test]
+fn small_bom_and_shebang_budget() {
+    use cargo_gamma_engine::parse::test_util;
+
+    let endings: &[&str] = if cfg!(miri) { &["\r\n"] } else { &["\n", "\r\n", ""] };
+    let interpreter = "#!/(((((((((!!!!!!!!!";
+    for ending in endings {
+        let text = format!("\u{feff}{interpreter}{ending}");
+        assert!(!test_util::exceeds_nesting_limit(&text, 2));
+        let file = test_util::parse("script.rs", text, 2).unwrap();
+        assert!(file.has_bom());
+        assert_eq!(file.text(), format!("{interpreter}{ending}"));
+        assert_eq!(
+            file.ast().shebang.as_deref(),
+            Some(format!("{interpreter}{}", ending.trim_end_matches('\n')).as_str())
+        );
+        assert_eq!(file.ast().items.len(), 0);
+    }
 }

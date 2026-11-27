@@ -2741,7 +2741,8 @@ mod tests {
 
 #[cfg(loom)]
 pub(crate) mod loom_models {
-    use loom::sync::Arc;
+    use std::sync::Arc;
+
     use loom::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
     use super::{claim_reaper, next_name_ticket, release_reaper_claim};
@@ -2760,23 +2761,16 @@ pub(crate) mod loom_models {
         loom::model(|| {
             let sequence = Arc::new(AtomicU64::new(0));
 
-            let workers: Vec<_> = (0..2)
-                .map(|_worker| {
-                    let sequence = Arc::clone(&sequence);
-
-                    loom::thread::spawn(move || next_name_ticket(&sequence))
-                })
-                .collect();
-
-            let mut tickets: Vec<_> = workers.into_iter().map(|worker| worker.join().expect("ticket thread")).collect();
-
-            tickets.sort_unstable();
-
-            let issued = tickets.len();
-
-            tickets.dedup();
-
-            assert_eq!(tickets.len(), issued, "two concurrent leaf creations were handed the same name");
+            let worker = {
+                let sequence = Arc::clone(&sequence);
+                loom::thread::spawn(move || next_name_ticket(&sequence))
+            };
+            let main_ticket = next_name_ticket(&sequence);
+            let worker_ticket = worker.join().expect("a ticket worker panic indicates a violated model invariant");
+            assert_ne!(
+                main_ticket, worker_ticket,
+                "two concurrent leaf creations were handed the same name"
+            );
         });
     }
 
@@ -2793,18 +2787,15 @@ pub(crate) mod loom_models {
         loom::model(|| {
             let running = Arc::new(AtomicBool::new(false));
 
-            let callers: Vec<_> = (0..2)
-                .map(|_caller| {
-                    let running = Arc::clone(&running);
-                    loom::thread::spawn(move || claim_reaper(&running))
-                })
-                .collect();
-
-            let starters = callers
-                .into_iter()
-                .map(|caller| usize::from(caller.join().expect("claim thread")))
-                .sum::<usize>();
+            let caller = {
+                let running = Arc::clone(&running);
+                loom::thread::spawn(move || claim_reaper(&running))
+            };
+            let main_started = claim_reaper(&running);
+            let worker_started = caller.join().expect("a claim worker panic indicates a violated model invariant");
+            let starters = usize::from(main_started) + usize::from(worker_started);
             assert_eq!(starters, 1, "the number of reaper threads started");
+            assert!(running.load(Ordering::SeqCst));
         });
     }
 
@@ -2830,19 +2821,17 @@ pub(crate) mod loom_models {
                 })
             };
 
-            let retrying = {
-                let running = Arc::clone(&running);
-                loom::thread::spawn(move || claim_reaper(&running))
-            };
-
-            failing.join().expect("failing thread");
-            let started = retrying.join().expect("retrying thread");
+            let started = claim_reaper(&running);
+            failing.join().expect("a release worker panic indicates a violated model invariant");
 
             // Whoever ends up holding the claim, the run must not be left believing a reaper is
             // running when none is: either the second caller started one, or the claim is free for
             // the next abandoned leaf to try again.
             let running_now = running.load(Ordering::SeqCst);
-            assert!(started || !running_now, "the reaper claim was left held with no reaper behind it");
+            assert_eq!(
+                running_now, started,
+                "the claim must belong exactly to the caller that started a reaper"
+            );
         });
     }
 }
