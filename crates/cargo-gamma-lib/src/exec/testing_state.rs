@@ -21,7 +21,7 @@ use crate::exec::copy::VCS_DIRS;
 use crate::model::{Mutant, Outcome};
 use crate::{Result, elements as publication};
 
-const VERSION: u32 = 3;
+const VERSION: u32 = 4;
 const SNAPSHOT: &str = "testing-session.json";
 const JOURNAL: &str = "testing-verdicts.jsonl";
 const PHASE: &str = "testing-phase.json";
@@ -4549,11 +4549,15 @@ mod tests {
     #[cfg_attr(miri, ignore = "writes and reloads prepared snapshot files")]
     fn rejects_incompatible_identity_version_platform_and_missing_snapshot() {
         let (_directory, mut state) = fixture();
-        for incompatible in [1, 2, VERSION + 1] {
+        for incompatible in [1, 2, 3, VERSION + 1] {
             state.version = incompatible;
             save(&state);
             assert!(failure(&state.record.base).contains("incompatible"));
         }
+        assert!(
+            state.record.base.join(SNAPSHOT).is_file(),
+            "refusing an old snapshot preserves published state"
+        );
         state.version = VERSION;
         state.platform = "foreign".into();
         save(&state);

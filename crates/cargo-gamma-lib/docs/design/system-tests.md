@@ -37,6 +37,17 @@ The boundary comprises:
 - The native cache-generation acceptance case in `tests/discovery/source_generations.rs`
   requires `system-tests` because it invokes Cargo metadata. Its supplied-source
   generation checks remain ordinary tests.
+- `exec::workspace::tests::git_metadata_private_mirror_preserves_version_inputs_and_source_state`
+  requires `system-tests` and native Git/Cargo. It uses an owned checkout and linked
+  worktree, staged and unstaged version inputs, tags, and split-index state. The
+  real build must observe those inputs; successful scratch `git add` and ref
+  updates must leave the source index and refs unchanged. Default and in-repository
+  explicit caches both reprepare from the latest source metadata.
+- The in-process Git metadata policy tests inject selected-worktree discovery,
+  Git command results, filesystem checks, and private-file publication failures;
+  they invoke no native Git or Cargo subprocess. A command-environment test also
+  verifies that ambient Git storage-routing variables and `GIT_CONFIG_*`
+  overrides cannot redirect the private workspace metadata.
 - The ancestor-target lint-cap acceptance case in `cargo-gamma/tests/binary.rs`
   requires that crate's `system-tests` feature, which forwards to the library's
   feature of the same name.

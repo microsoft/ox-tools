@@ -148,6 +148,17 @@ Cargo metadata, then accept only a persisted locator or cache owner for that
 workspace identity. If current workspace identity cannot be resolved, they fail
 rather than adopting potentially stale state.
 
+Workspace preparation gives Git metadata its own cache-owned mirror outside
+the copied source tree. The mirror keeps refs and immutable objects available,
+but its worktree path, selected `HEAD`, index, and split-index dependencies are
+private to the scratch copy; scratch Git writes therefore do not target the
+source repository. The mirror is rebuilt under the workspace lock on every
+preparation, including cache reuse. A workspace below its Git worktree root or
+a repository whose object alternates cannot be detached is refused before a
+build. Cargo children also discard ambient Git storage-routing and configuration
+overrides so build-script Git commands follow the private pointer. Other
+supported VCS markers retain their existing visibility and link behavior.
+
 Every measured campaign, including `--incremental no`, publishes completed
 campaign state and therefore holds the process-held workspace lock for its
 lifetime. Measured campaigns for one workspace are serialized. Dry runs publish
