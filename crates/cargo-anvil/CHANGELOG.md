@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+## [0.29.1] - 2026-11-27
+
+- ✔️ Tasks
+
+  - cargo-anvil: adopt cargo-coverage-gate 0.7.6
+
 ## [0.29.0] - 2026-11-27
 
 - ✨ Features
