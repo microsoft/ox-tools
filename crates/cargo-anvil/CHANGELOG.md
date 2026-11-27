@@ -4,6 +4,10 @@
 
 ## [0.28.6] - 2026-11-27
 
+- 🐛 Bug Fixes
+
+  - cargo-anvil: remove non-container PowerShell dependency
+
 - ✔️ Tasks
 
   - update Anvil to cargo-gamma 0.8.0 ([#400](https://github.com/microsoft/ox-tools/pull/400))
