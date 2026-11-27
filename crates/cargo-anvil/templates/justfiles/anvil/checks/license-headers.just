@@ -5,5 +5,5 @@
 # Regenerate with cargo-anvil to update this file.
 
 # Verify source files carry the required license header.
-anvil-license-headers: anvil-license-headers-validate-prereqs anvil-impact
-    cargo each {{ anvil_modified_selection }} --once -- cargo {{ anvil_stable_toolchain_arg }} heather
+anvil-license-headers: anvil-license-headers-validate-prereqs
+    cargo each --workspace --once -- cargo {{ anvil_stable_toolchain_arg }} heather

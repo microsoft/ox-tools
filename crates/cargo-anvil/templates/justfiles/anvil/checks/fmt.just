@@ -4,8 +4,8 @@
 # Update cargo-anvil and regenerate; repository-specific edits stop automatic updates.
 # Regenerate with cargo-anvil to update this file.
 
-# Check or fix Rust formatting for modified workspace packages.
+# Check or fix Rust formatting across the workspace.
 [group("anvil")]
 [arg("fix", long, value="true")]
-anvil-fmt fix="false": anvil-fmt-validate-prereqs anvil-impact
-    cargo +{{ rust_nightly }} each {{ anvil_modified_selection }} --keep-going -- cargo +{{ rust_nightly }} fmt --manifest-path '{manifest}' {{ if fix == "true" { "" } else { "--check" } }}
+anvil-fmt fix="false": anvil-fmt-validate-prereqs
+    cargo +{{ rust_nightly }} fmt --all {{ if fix == "true" { "" } else { "--check" } }}
