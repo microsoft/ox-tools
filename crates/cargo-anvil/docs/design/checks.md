@@ -85,34 +85,11 @@ Types are case-insensitive: `feat`, `fix`, `chore`, `docs`, `refactor`, `test`,
 
 #### Test-only features
 
-Run `just anvil-deny-test-features` to check the entire workspace with
-[`cargo-ensure-no-test-features`](https://crates.io/crates/cargo-ensure-no-test-features),
-installed by `just anvil-setup`. The check
-skips `publish = false` members and dev-dependencies. It checks explicit
-feature requests on normal and build dependencies, including inherited,
-optional, and target-specific declarations. It also checks features reachable
-from each publishable member's `default`, including direct forwarding to
-normal or build dependencies. Weak forwarding (`dep?/feature`) is checked
-even when the optional dependency is not enabled. The check does not resolve
-dependencies' own defaults or transitive feature activation.
-
-The checker bundles the exact, case-sensitive names `fakes`, `test-util`,
-and `insecure`. To customize the policy,
-commit a repository-owned `.anvil/deny-test-features.json`. An optional
-`features` array replaces the bundled list. An optional `exceptions` array
-permits individual uses without removing the name from the list:
-
-```json
-{
-  "exceptions": [
-    { "package": "my-client", "dependency": "transport", "feature": "insecure" }
-  ]
-}
-```
-
-Use the dependency key from `Cargo.toml` (the alias if renamed). Omitting
-`dependency` exempts only the package's own default activation of the named
-feature, not dependency requests. An invalid policy fails the check.
+`just anvil-deny-test-features` runs the checker once for the whole workspace,
+even when impact analysis selects no packages. To override its bundled policy,
+commit `.anvil/deny-test-features.json`. See the
+[`cargo-ensure-no-test-features` documentation](https://docs.rs/cargo-ensure-no-test-features)
+for the default deny list, policy format, and exceptions.
 
 ### `pr-test`
 
