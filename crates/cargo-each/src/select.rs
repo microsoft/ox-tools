@@ -5,7 +5,7 @@
 //! a [`Workspace`].
 //!
 //! Mirrors `cargo build`'s selection surface: `-p`/`--package` (with glob
-//! support and optional `@version` qualifier), `--workspace`/`--all`, and
+//! support, optional `@version` qualifier, and source-qualified identities), `--workspace`/`--all`, and
 //! `--exclude`, plus a repeatable `--package-file` and the
 //! `cargo-each`-specific `--none` (explicit empty set). When nothing is named
 //! the default is cargo's `default-members`, exactly like `cargo build`.
@@ -15,6 +15,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use cargo_metadata::semver::Version;
+use url::Url;
 
 use crate::error::{EachError, InvalidPackageFileLineError, PackageFileReadError, PackageFileUtf8Error, UnknownSelectorError};
 use crate::filter::glob_matches;
@@ -50,17 +51,19 @@ impl Selection {
     /// Returns [`EachError`] when a package file cannot be read as UTF-8 or
     /// contains a malformed nonempty line.
     pub(crate) fn from_sources(
+        workspace: &Workspace,
         packages: &[String],
         package_files: &[PathBuf],
         all: bool,
         exclude: &[String],
         none: bool,
     ) -> Result<Self, EachError> {
-        Self::from_sources_with_reader(packages, package_files, all, exclude, none, |path| fs::read(path))
+        Self::from_sources_with_reader(workspace, packages, package_files, all, exclude, none, |path| fs::read(path))
     }
 
     /// Build a selection with an explicit package-file reader.
     pub(crate) fn from_sources_with_reader(
+        workspace: &Workspace,
         packages: &[String],
         package_files: &[PathBuf],
         all: bool,
@@ -71,7 +74,7 @@ impl Selection {
         let mut combined = packages.to_vec();
         for path in package_files {
             let bytes = read(path).map_err(|error| PackageFileReadError::caused_by(path.display().to_string(), error))?;
-            combined.extend(parse_package_file(path, bytes)?);
+            combined.extend(parse_package_file(workspace, path, bytes)?);
         }
         Ok(Self {
             packages: combined,
@@ -136,7 +139,7 @@ impl Selection {
     }
 }
 
-fn parse_package_file(path: &Path, bytes: Vec<u8>) -> Result<Vec<String>, EachError> {
+fn parse_package_file(workspace: &Workspace, path: &Path, bytes: Vec<u8>) -> Result<Vec<String>, EachError> {
     let display = path.display().to_string();
     let contents = String::from_utf8(bytes).map_err(|error| PackageFileUtf8Error::caused_by(display.clone(), error))?;
     contents
@@ -148,13 +151,16 @@ fn parse_package_file(path: &Path, bytes: Vec<u8>) -> Result<Vec<String>, EachEr
             if line.is_empty() {
                 None
             } else {
-                Some(validate_package_file_spec(&display, index + 1, line).map(str::to_owned))
+                Some(validate_package_file_spec(workspace, &display, index + 1, line).map(str::to_owned))
             }
         })
         .collect()
 }
 
-fn validate_package_file_spec<'a>(path: &str, line: usize, spec: &'a str) -> Result<&'a str, EachError> {
+fn validate_package_file_spec<'a>(workspace: &Workspace, path: &str, line: usize, spec: &'a str) -> Result<&'a str, EachError> {
+    if workspace.members.iter().any(|member| member.package_id == spec) {
+        return Ok(spec);
+    }
     let invalid = |reason: &str| InvalidPackageFileLineError::new(path.to_owned(), line, spec.to_owned(), reason.to_owned()).into();
     if spec.bytes().any(|byte| byte.is_ascii_whitespace()) {
         return Err(invalid("leading, trailing, and embedded whitespace are not allowed"));
@@ -164,6 +170,11 @@ fn validate_package_file_spec<'a>(path: &str, line: usize, spec: &'a str) -> Res
     }
     if spec.starts_with('-') {
         return Err(invalid("command-line tokens are not package specs"));
+    }
+    // Validate non-ID URL syntax even when selection precedence skips resolution.
+    if spec.contains("://") {
+        Url::parse(spec).map_err(|error| invalid(&format!("invalid source-qualified URL: {error}")))?;
+        return Ok(spec);
     }
     let mut pieces = spec.split('@');
     let name = pieces.next().expect("split always yields at least one element");
@@ -192,6 +203,17 @@ fn validate_package_file_spec<'a>(path: &str, line: usize, spec: &'a str) -> Res
 fn resolve_selectors<'w>(workspace: &'w Workspace, selectors: &[String]) -> Result<Vec<&'w Member>, EachError> {
     let mut matched: HashSet<&str> = HashSet::new();
     for selector in selectors {
+        if let Some(member) = workspace.members.iter().find(|member| {
+            member.package_id == *selector
+                || (selector.starts_with("file://") && {
+                    let source = Url::from_file_path(member.manifest_dir())
+                        .expect("Cargo metadata manifest directories are absolute filesystem paths");
+                    format!("{source}#{}", member.spec()) == *selector
+                })
+        }) {
+            matched.insert(member.name.as_str());
+            continue;
+        }
         // A `name@version` spec matches on the name (glob) *and*, when a
         // version is supplied, on the version per cargo's package-id-spec:
         // the qualifier may be partial, so `alpha@0.1` matches member `0.1.0`
@@ -309,6 +331,7 @@ mod tests {
 
     fn member(name: &str) -> Member {
         Member {
+            package_id: format!("metadata-id-{name}"),
             name: name.to_owned(),
             version: "0.1.0".to_owned(),
             rust_version: Some("1.70.0".parse().expect("valid Rust version")),
@@ -373,6 +396,7 @@ mod tests {
 
     #[test]
     fn package_file_lines_reject_comments_tokens_and_whitespace() {
+        let ws = workspace(&[]);
         for (spec, reason) in [
             ("#alpha", "comments are not supported"),
             ("--workspace", "command-line tokens are not package specs"),
@@ -385,12 +409,14 @@ mod tests {
             ("alpha@1@2", "a package spec may contain at most one `@`"),
         ] {
             assert_eq!(
-                validate_package_file_spec("packages.txt", 7, spec).expect_err(spec).to_string(),
+                validate_package_file_spec(&ws, "packages.txt", 7, spec)
+                    .expect_err(spec)
+                    .to_string(),
                 format!("invalid package spec in `packages.txt` at line 7: `{spec}` ({reason})")
             );
         }
         for spec in ["alpha", "alpha@1.2.3", "cargo-*", "?eta"] {
-            assert_eq!(validate_package_file_spec("packages.txt", 1, spec).expect(spec), spec);
+            assert_eq!(validate_package_file_spec(&ws, "packages.txt", 1, spec).expect(spec), spec);
         }
     }
 
