@@ -36,14 +36,17 @@ pub(super) fn check(temp_dir: Option<&Path>) -> Result<()> {
 
 fn parse_candidates(json: &str) -> Result<BTreeMap<String, String>> {
     let report: Vec<Value> = serde_json::from_str(json)?;
-    report
-        .iter()
-        .map(|candidate| {
-            let name = candidate["name"].as_str().ok_or("candidate is missing its name")?;
-            let version = candidate["new_version"].as_str().ok_or("candidate is missing its version")?;
-            Ok((name.to_owned(), version.to_owned()))
-        })
-        .collect()
+    let mut candidates = BTreeMap::new();
+    for candidate in report {
+        let name = candidate["name"].as_str().ok_or("candidate is missing its name")?;
+        let version = candidate["new_version"].as_str().ok_or("candidate is missing its version")?;
+        if let Some(reported_version) = candidates.insert(name.to_owned(), version.to_owned())
+            && reported_version != version
+        {
+            return Err(format!("report lists two versions for `{name}`: `{reported_version}` and `{version}`; keep one").into());
+        }
+    }
+    Ok(candidates)
 }
 
 fn scratch_directory(root: &Path, temp_dir: Option<&Path>) -> Result<tempfile::TempDir> {
@@ -267,6 +270,20 @@ mod tests {
     }
 
     #[test]
+    fn deduplicates_candidates_with_the_same_name_and_version() -> Result<()> {
+        let report = r#"[
+            {"name":"peer","new_version":"1.2.0"},
+            {"name":"other","new_version":"1.2.0"},
+            {"name":"peer","new_version":"1.2.0"}
+        ]"#;
+        assert_eq!(
+            parse_candidates(report)?,
+            BTreeMap::from([("other".into(), "1.2.0".into()), ("peer".into(), "1.2.0".into())])
+        );
+        Ok(())
+    }
+
+    #[test]
     fn rejects_invalid_candidate_reports() {
         for report in ["", "{}"] {
             assert!(parse_candidates(report).is_err(), "{report}");
@@ -274,6 +291,10 @@ mod tests {
         for (report, diagnostic) in [
             (r#"[{"new_version":"1.2.0"}]"#, "candidate is missing its name"),
             (r#"[{"name":"peer","old_version":"1.1.0"}]"#, "candidate is missing its version"),
+            (
+                r#"[{"name":"peer","new_version":"1.1.0"},{"name":"peer","new_version":"1.2.0"}]"#,
+                "report lists two versions for `peer`: `1.1.0` and `1.2.0`; keep one",
+            ),
         ] {
             assert_eq!(parse_candidates(report).unwrap_err().to_string(), diagnostic);
         }

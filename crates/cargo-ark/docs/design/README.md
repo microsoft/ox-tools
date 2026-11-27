@@ -9,6 +9,13 @@ standard input. Each entry supplies `name` and `new_version`; other fields are
 ignored. Run it from the candidate workspace. An empty array succeeds without
 running Cargo.
 
+Repeated entries for the same name and version count as one candidate. Cargo
+requires workspace members to have distinct package names, even when their
+versions differ, so a report from one workspace snapshot cannot contain
+conflicting versions. If a hand-written or combined report lists different
+versions for the same name, Ark rejects it and names both versions in the
+error.
+
 Ark packages exactly the listed versions together with Cargo's normal package
 verification and registry selection. It then runs the tests from each `.crate`
 archive separately with `--all-features`, with `--no-default-features`, and with
@@ -25,5 +32,5 @@ helps catch tests that rely on files present only in the checkout. The optional
 to the workspace or a directory inside it. If the workspace `Cargo.lock` is
 out of date, `cargo package` may update it in your checkout.
 
-The command reports errors and exits nonzero if it cannot complete packaging or
-testing. It does not discover candidates or publish crates.
+The command reports errors and exits nonzero if the input is invalid or if
+packaging or testing fails. It does not discover candidates or publish crates.
