@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitCode, Output, Stdio};
 use std::{env, fs, io};
 
-use cargo_coverage_gate::{CoverageGateError, filter_lcov_many};
+use cargo_coverage_gate::{CoverageGateError, filter_lcov_many_for_target};
 use cargo_metadata::{Metadata, MetadataCommand};
 use ohno::{AppError, EnrichableExt as _, IntoAppError};
 use semver::Version;
@@ -100,7 +100,7 @@ pub(crate) fn run(args: &CoverageGateArgs, collection: &CollectionArgs) -> Resul
         for configuration in configurations {
             collected.push(collect_configuration(&execution, configuration)?);
         }
-        filter_then_evaluate(&execution, &collected, |lcov_paths| {
+        filter_then_evaluate(&execution, &collected, &effective_target.triple, |lcov_paths| {
             crate::run::evaluate_filtered_paths(args, lcov_paths, &selection.gated_names(), Some(&effective_target.triple), |path| {
                 fs::read_to_string(path)
             })
@@ -129,9 +129,15 @@ fn complete_collection(
 fn filter_then_evaluate(
     execution: &CollectionExecution<'_>,
     collected: &[CollectedReport],
+    policy_target: &str,
     evaluate: impl FnOnce(&[PathBuf]) -> Result<ExitCode, AppError>,
 ) -> Result<Result<ExitCode, AppError>, AppError> {
-    filter_then_evaluate_with(execution, collected, filter_and_publish_reports, evaluate)
+    filter_then_evaluate_with(
+        execution,
+        collected,
+        |execution, collected| filter_and_publish_reports(execution, collected, policy_target),
+        evaluate,
+    )
 }
 
 fn filter_then_evaluate_with(
@@ -715,8 +721,14 @@ fn collect_configuration(execution: &CollectionExecution<'_>, configuration: Fea
     })
 }
 
-fn filter_and_publish_reports(execution: &CollectionExecution<'_>, collected: &[CollectedReport]) -> Result<Vec<PathBuf>, AppError> {
-    filter_and_publish_reports_using(execution, collected, filter_lcov_many)
+fn filter_and_publish_reports(
+    execution: &CollectionExecution<'_>,
+    collected: &[CollectedReport],
+    policy_target: &str,
+) -> Result<Vec<PathBuf>, AppError> {
+    filter_and_publish_reports_using(execution, collected, |raw, manifest| {
+        filter_lcov_many_for_target(raw, manifest, Some(policy_target))
+    })
 }
 
 /// Adapts the native filter's manifest and typed errors before publication, with a supplied filter.

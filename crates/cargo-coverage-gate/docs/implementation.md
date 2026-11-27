@@ -90,6 +90,17 @@ The optional `run` mode keeps collection and evaluation separated internally:
    Azure DevOps byte-identical released-surface reports.
    `no-default-features` maps to `lcov-no-default.info`.
 
+Before staging, effective coverage policy is resolved from the same metadata
+snapshot as source ownership, including target replacements and workspace
+defaults. After source filtering and merged-checksum validation, complete
+sections owned by exactly-zero numeric-threshold packages are omitted. The
+shared longest-prefix attribution helper also handles nested members here.
+No-coverable-lines assertions are retained even with a zero workspace default.
+Tests still run instrumented; only report records change. `--collect-only`
+bypasses this policy filtering along with source filtering. Public filtering
+APIs apply host policy, or an explicit target through
+`filter_lcov_many_for_target`; `run` passes its collection target.
+
 The Windows response-file retry also writes only to scratch. Successful retry
 output and the valid paired no-data conversion pass through the same source
 filter before publication. Other retry failures preserve a previously
@@ -265,7 +276,7 @@ the workspace discovered from the invocation directory.
    A measured graph-gap source is retained as a zero-line source witness in
    every output that depends on the batch's conservative classification.
    The filtering parser preserves these standard empty source sections while
-   ordinary aggregation ignores them, so a second filtering pass cannot lose
+   ordinary aggregation ignores them, so a second source-filtering pass cannot lose
    provenance merely because all of the witness source's counters were test-only.
 4. The LCOV parser merges filtered reports by source path and line number. A line is
    coverable when it has a distinct `DA:` record. Hit counts determine the

@@ -1184,6 +1184,176 @@ fn zero_threshold_only_selection_is_instrumented_and_accepts_empty_lcov() {
 }
 
 #[test]
+fn published_reports_omit_zero_policy_without_skipping_instrumented_tests() {
+    let tmp = TempDir::new().expect("tempdir");
+    make_workspace(tmp.path(), &[("alpha", Some("0")), ("beta", Some("50"))], None);
+    let object = tmp.path().join(format!("test-object{EXE_SUFFIX}"));
+    fs::write(&object, b"object").expect("write fake object");
+    let tools = FakeCoverageTools::compile();
+
+    fake_collection_command(tmp.path(), &tools, &object)
+        .env("FAKE_LCOV_HITS", "0")
+        .assert()
+        .success();
+
+    let published = fs::read_to_string(tmp.path().join("coverage/lcov-all-features.info")).expect("published LCOV");
+    assert!(!published.contains("alpha"), "{published}");
+    assert!(published.contains("beta"), "{published}");
+    assert!(published.contains("DA:4,0"), "{published}");
+    assert!(published.contains("LH:2"), "{published}");
+    assert!(published.contains("LF:3"), "{published}");
+    let log = fs::read_to_string(tmp.path().join("tools.log")).expect("tool log");
+    let nextest = log
+        .lines()
+        .find(|line| line.contains("cargo\tllvm-cov\tnextest"))
+        .expect("instrumented nextest");
+    assert!(nextest.contains("--workspace"), "{log}");
+    assert!(!log.contains("cargo\tnextest\trun"), "{log}");
+}
+
+#[test]
+fn released_reports_apply_effective_zero_policy_but_preserve_assertions_and_nonzero_floors() {
+    use cargo_coverage_gate::{Verdict, evaluate, evaluate_unfiltered, filter_lcov_many};
+
+    let tmp = TempDir::new().expect("tempdir");
+    make_workspace(
+        tmp.path(),
+        &[
+            ("alpha", None),
+            ("beta", Some("50")),
+            ("gamma", Some("0.0001")),
+            ("assertion", None),
+        ],
+        Some("0"),
+    );
+    let assertion_manifest = tmp.path().join("assertion/Cargo.toml");
+    let manifest = fs::read_to_string(&assertion_manifest).unwrap();
+    fs::write(
+        assertion_manifest,
+        format!("{manifest}\n[package.metadata.coverage-gate]\nexpect-no-coverable-lines = true\n"),
+    )
+    .unwrap();
+    let manifest = tmp.path().join("Cargo.toml");
+    let first = make_coverage_lcov(tmp.path(), &[("alpha/src/lib.rs", 1, 0), ("beta/src/lib.rs", 1, 0)]);
+    let second = make_coverage_lcov(tmp.path(), &[("gamma/src/lib.rs", 1, 0), ("assertion/src/lib.rs", 1, 1)]);
+    let filtered = filter_lcov_many(&[&first, &second], Some(&manifest)).unwrap();
+    assert_eq!(filtered.len(), 2);
+    assert!(!filtered[0].contains("alpha"), "{}", filtered[0]);
+    assert!(filtered[0].contains("beta"), "{}", filtered[0]);
+    assert!(filtered[0].contains("DA:4,0"), "{}", filtered[0]);
+    assert!(filtered[1].contains("gamma"), "{}", filtered[1]);
+    assert!(filtered[1].contains("assertion"), "{}", filtered[1]);
+    let report = evaluate(&second, Some(&manifest), &["assertion".to_owned()]).unwrap();
+    assert_eq!(report.verdict(), Verdict::Fail);
+    let mut diagnostics = Vec::new();
+    report.render_text(&mut diagnostics).unwrap();
+    let diagnostics = String::from_utf8(diagnostics).unwrap();
+    assert!(
+        diagnostics.contains(&format!("{}: 4", Path::new("src").join("lib.rs").display())),
+        "{diagnostics}"
+    );
+
+    let raw = evaluate_unfiltered(&first, Some(&manifest), &["alpha".to_owned()]).unwrap();
+    let mut text = Vec::new();
+    raw.render_text(&mut text).unwrap();
+    let text = String::from_utf8(text).unwrap();
+    assert!(text.contains("0.0%"), "{text}");
+    assert!(!text.contains("(no data)"), "{text}");
+
+    let contributed = make_coverage_lcov(tmp.path(), &[("beta/src/lib.rs", 1, 1)]).replace("TN:\n", "TN:alpha-tests\n");
+    let filtered = filter_lcov_many(&[&first, &contributed], Some(&manifest)).unwrap();
+    assert!(filtered[1].contains("TN:alpha-tests"), "{}", filtered[1]);
+    assert!(filtered[1].contains("DA:4,5"), "{}", filtered[1]);
+    let report = cargo_coverage_gate::evaluate_many(&[&first, &contributed], Some(&manifest), &["beta".to_owned()]).unwrap();
+    assert_eq!(
+        report.verdict(),
+        Verdict::Pass,
+        "hits in another package survive regardless of test origin"
+    );
+}
+
+#[test]
+fn report_policy_uses_target_replacements_and_exact_triple_precedence() {
+    use cargo_coverage_gate::filter_lcov_many_for_target;
+
+    let tmp = TempDir::new().expect("tempdir");
+    make_workspace_with_gate(
+        tmp.path(),
+        &[
+            (
+                "alpha",
+                "min-lines-percent = 100\n\
+                 [package.metadata.coverage-gate.target.'cfg(unix)']\nmin-lines-percent = 0",
+            ),
+            (
+                "beta",
+                "min-lines-percent = 0\n\
+                 [package.metadata.coverage-gate.target.'cfg(unix)']\nmin-lines-percent = 0\n\
+                 [package.metadata.coverage-gate.target.x86_64-unknown-linux-gnu]\nmin-lines-percent = 100",
+            ),
+            (
+                "gamma",
+                "min-lines-percent = 0\n\
+                 [package.metadata.coverage-gate.target.x86_64-unknown-linux-gnu]\nexpect-no-coverable-lines = true",
+            ),
+        ],
+    );
+    let manifest = tmp.path().join("Cargo.toml");
+    let input = make_coverage_lcov(
+        tmp.path(),
+        &[("alpha/src/lib.rs", 1, 0), ("beta/src/lib.rs", 1, 0), ("gamma/src/lib.rs", 1, 0)],
+    );
+    let filtered = filter_lcov_many_for_target(&[&input], Some(&manifest), Some("x86_64-unknown-linux-gnu")).unwrap();
+    assert!(!filtered[0].contains("alpha"), "{}", filtered[0]);
+    assert!(filtered[0].contains("beta"), "{}", filtered[0]);
+    assert!(filtered[0].contains("gamma"), "{}", filtered[0]);
+    let report =
+        cargo_coverage_gate::evaluate_many_for_target(&[&input], Some(&manifest), &["gamma".to_owned()], Some("x86_64-unknown-linux-gnu"))
+            .unwrap();
+    assert_eq!(report.verdict(), cargo_coverage_gate::Verdict::Fail);
+    let filtered = filter_lcov_many_for_target(&[&input], Some(&manifest), Some("x86_64-pc-windows-msvc")).unwrap();
+    assert!(filtered[0].contains("alpha"), "{}", filtered[0]);
+    assert!(!filtered[0].contains("beta"), "{}", filtered[0]);
+    assert!(!filtered[0].contains("gamma"), "{}", filtered[0]);
+}
+
+#[test]
+fn zero_policy_does_not_hide_invalid_lines_unowned_sources_or_checksum_conflicts() {
+    use cargo_coverage_gate::filter_lcov_many;
+
+    let tmp = TempDir::new().expect("tempdir");
+    make_workspace(tmp.path(), &[("alpha", Some("0"))], None);
+    let manifest = tmp.path().join("Cargo.toml");
+    let source = tmp.path().join("alpha/src/lib.rs");
+    let unknown = tmp.path().join("unowned.rs");
+    fs::write(&unknown, RELEASED_SOURCE).unwrap();
+    let first = format!("TN:first\nSF:{}\nDA:4,0,first\nend_of_record\n", source.display());
+    let conflict = format!("TN:second\nSF:{}\nDA:4,1,second\nend_of_record\n", source.display());
+    for (inputs, expected) in [
+        (vec![format!("SF:{}\nDA:999999,0\nend_of_record\n", source.display())], "source has"),
+        (vec![format!("SF:{}\nDA:4,0\nend_of_record\n", unknown.display())], "not reachable"),
+        (vec![first.clone(), conflict.clone()], "conflicting checksums"),
+        (vec![format!("{first}{conflict}")], "conflicting checksums"),
+        (vec!["not lcov".to_owned()], "lcov tracefile"),
+    ] {
+        let refs = inputs.iter().map(String::as_str).collect::<Vec<_>>();
+        let error = filter_lcov_many(&refs, Some(&manifest)).unwrap_err().to_string();
+        assert!(error.contains(expected), "{error}");
+    }
+}
+
+#[test]
+fn zero_policy_also_removes_empty_source_provenance_records() {
+    let tmp = TempDir::new().expect("tempdir");
+    make_workspace(tmp.path(), &[("alpha", Some("0"))], None);
+    let orphan = tmp.path().join("alpha/src/orphan.rs");
+    fs::write(&orphan, "#[cfg(test)]\nfn helper() {}\n").unwrap();
+    let input = format!("TN:\nSF:{}\nDA:2,0\nend_of_record\n", orphan.display());
+    let filtered = cargo_coverage_gate::filter_lcov(&input, Some(&tmp.path().join("Cargo.toml"))).unwrap();
+    assert_eq!(filtered, "");
+}
+
+#[test]
 #[cfg_attr(miri, ignore = "spawns the binary and fake coverage tools")]
 fn explicit_target_is_propagated_to_collection_and_evaluation() {
     let tmp = TempDir::new().expect("tempdir");
@@ -1206,6 +1376,12 @@ fn explicit_target_is_propagated_to_collection_and_evaluation() {
         .assert()
         .success()
         .stdout(predicate::str::contains("all packages meet their threshold"));
+
+    assert_eq!(
+        fs::read(tmp.path().join("coverage/lcov-all-features.info")).expect("published LCOV"),
+        b"",
+        "publication must use the explicit target's zero policy, not the host policy"
+    );
 
     let log = fs::read_to_string(tmp.path().join("tools.log")).expect("read fake tool log");
     let collection_commands = log
