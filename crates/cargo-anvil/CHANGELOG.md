@@ -2,11 +2,25 @@
 
 ## [Unreleased]
 
-## [0.29.1] - 2026-11-27
+## [0.29.2] - 2026-11-27
 
 - 🐛 Bug Fixes
 
   - cargo-anvil: qualify Cargo package selectors by source
+
+- ✔️ Tasks
+
+  - cargo-anvil: prepare 0.29.1 catalog artifacts
+
+## [0.29.1] - 2026-11-27
+
+- ✨ Features
+
+  - cargo-anvil: guard publishable crates against test features ([#385](https://github.com/microsoft/ox-tools/pull/385))
+
+- ✔️ Tasks
+
+  - update Anvil to cargo-gamma 0.8.0 ([#400](https://github.com/microsoft/ox-tools/pull/400))
 
 ## [0.29.0] - 2026-11-27
 

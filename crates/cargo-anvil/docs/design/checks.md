@@ -48,7 +48,7 @@ Locally, recipes run on the host OS. See [github.md](./github.md) and
 
 | Check | Contract |
 |-------|----------|
-| `fmt` | Checks modified workspace packages with pinned-nightly rustfmt; `ANVIL_IMPACT=off` checks the full workspace. Non-member path dependencies are excluded. Local `--fix` applies the same scope. |
+| `fmt` | Runs pinned-nightly `cargo fmt --all` once, regardless of impact. Cargo includes workspace packages and local path dependencies. Local `--fix` applies the same scope. |
 | `clippy` | Checks selected packages with all targets and features, locked dependencies, and warnings as errors. |
 | `cargo-sort` | Checks dependency ordering and manifest formatting, preserving blank-line-separated dependency groups. |
 | `license-headers` | Checks workspace license headers with cargo-heather. |
@@ -276,13 +276,17 @@ Cargo-delta selects packages from the committed diff against the base.
 
 | Bucket | Checks | Behavior |
 |--------|--------|----------|
-| modified | fmt, cargo-sort, license-headers, ensure-no-cyclic-deps, ensure-no-default-features | Skip when empty; otherwise check the tool's normal workspace/input domain. |
+| modified | ensure-no-cyclic-deps, ensure-no-default-features | Skip when empty; otherwise check the tool's normal workspace/input domain. |
 | affected | clippy, check-all-targets, llvm-cov, doc-test, examples, msrv-test, mutants-diff, all Miri profiles, careful, loom, bolero, external-types, bench | Select affected packages; mutation testing further selects changed lines across the workspace. |
 | required | doc-build, unused-deps (package analysis), udeps, cargo-hack | Include affected packages and their workspace dependencies. |
-| unscoped | readme-check, spellcheck, pr-title, deny, audit, unused-deps (workspace dependency inheritance analysis), aprz, mutants-full | Run regardless of impact. |
+| unscoped | fmt, cargo-sort, license-headers, readme-check, spellcheck, pr-title, deny, audit, unused-deps (workspace dependency inheritance analysis), aprz, mutants-full | Run regardless of impact. |
 
-README templates and spelling dictionaries can be repository-level inputs, so
-their checks are unscoped. Empty categories skip package-scoped work
+Formatting runs directly without cargo-each or cargo-delta, including during
+setup and prerequisite validation. Manifest sorting and license-header checks
+also run over their full workspace/input domain without impact analysis; they
+retain cargo-each for workspace toolchain selection. README templates and
+spelling dictionaries can be repository-level inputs, so their checks are unscoped.
+Empty categories skip package-scoped work
 successfully. For `unused-deps`, `--skip` skips package analysis but still runs
 the workspace dependency inheritance check. Invalid reports, unknown package
 names, and failed metadata/discovery commands fail rather than silently
