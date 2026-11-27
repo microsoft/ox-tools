@@ -41,6 +41,7 @@ pub(crate) fn run(args: &CoverageGateArgs, collection: &CollectionArgs) -> Resul
 
     let tools = ToolPrograms::from_env();
     let (workspace, selection, collection) = prepare_collection(args, collection, &tools, WorkspaceInfo::load, resolved_collection)?;
+    withhold_merged_report_with(&collection.coverage_dir.join("lcov-merged.info"), remove_file_if_present)?;
     let configurations = normalized_configurations(&collection.configurations);
     let effective_target = EffectiveTarget::resolve(&workspace, args.target.as_deref(), &tools)?;
 
@@ -833,10 +834,7 @@ fn filter_and_publish_reports_with_reader_and_remove(
         })
         .collect::<Vec<_>>();
     if execution.args.collect_only {
-        remove_merged(&merged_path).into_app_err(format!(
-            "failed to withhold merged LCOV report `{}` during split collection",
-            diagnostic_path(&merged_path)
-        ))?;
+        withhold_merged_report_with(&merged_path, remove_merged)?;
     } else {
         let merged = merge_lcov(&published.iter().map(String::as_str).collect::<Vec<_>>())
             .into_app_err("failed to merge filtered LCOV reports for publication")?;
@@ -853,6 +851,18 @@ fn filter_and_publish_reports_with_reader_and_remove(
 
 fn remove_file_if_present(path: &Path) -> io::Result<()> {
     remove_file_if_present_with(path, |path| fs::remove_file(path))
+}
+
+/// Removes a prior canonical report before work that cannot recreate it.
+fn withhold_merged_report_with(path: &Path, remove: impl FnOnce(&Path) -> io::Result<()>) -> Result<(), AppError> {
+    let result = match remove(path) {
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        result => result,
+    };
+    result.into_app_err(format!(
+        "failed to withhold merged LCOV report `{}` during collection",
+        diagnostic_path(path)
+    ))
 }
 
 fn remove_file_if_present_with(path: &Path, remove: impl FnOnce(&Path) -> io::Result<()>) -> io::Result<()> {
@@ -1811,8 +1821,6 @@ mod tests {
                 cargo: OsString::from("never-invoked"),
                 rustc: OsString::from("never-invoked"),
             };
-            let merged_path = parent.path().join("lcov-merged.info");
-            fs::write(&merged_path, "stale merged report").expect("seed stale merged report");
             let collected = [
                 CollectedReport {
                     raw_path: PathBuf::from("scripted-all.info"),
@@ -1861,7 +1869,7 @@ mod tests {
                 );
                 assert!(!scratch_path.exists(), "successful collection must release its build scratch");
                 assert!(
-                    !merged_path.exists(),
+                    !parent.path().join("lcov-merged.info").exists(),
                     "collect-only publication must withhold the canonical merged report"
                 );
             }
@@ -1920,13 +1928,21 @@ mod tests {
         .expect_err("merged-report removal failure must stop publication");
 
         assert!(error.to_string().contains("failed to withhold merged LCOV report"), "{error}");
-        assert!(error.to_string().contains("during split collection"), "{error}");
+        assert!(error.to_string().contains("during collection"), "{error}");
     }
 
     #[test]
     fn collect_only_merged_removal_accepts_missing_and_preserves_other_errors() {
         let path = Path::new("synthetic-coverage/lcov-merged.info");
-        remove_file_if_present_with(path, |_| Err(io::Error::from(io::ErrorKind::NotFound)))
+        let stale = Cell::new(true);
+        withhold_merged_report_with(path, |_| {
+            assert!(stale.replace(false), "the stale report starts present");
+            Ok(())
+        })
+        .expect("a present merged report is withheld");
+        assert!(!stale.get(), "successful removal clears the stale in-memory state");
+
+        withhold_merged_report_with(path, |_| Err(io::Error::from(io::ErrorKind::NotFound)))
             .expect("missing merged report is already withheld");
         let error = remove_file_if_present_with(path, |_| Err(io::Error::from(io::ErrorKind::PermissionDenied)))
             .expect_err("other removal failures must propagate");
@@ -2373,7 +2389,6 @@ mod tests {
         ];
         fs::write(&collected[0].stable_path, "old all").expect("write old all");
         fs::write(&collected[1].stable_path, "old no-default").expect("write old no-default");
-        fs::write(coverage.join("lcov-merged.info"), "old merged").expect("write old merged");
 
         let paths = filter_and_publish_reports_with_reader(
             &execution,
