@@ -702,7 +702,7 @@ fn collect_configurations(
     collect_configurations_with(
         configurations,
         |configuration| collect_configuration(execution, configuration),
-        |configuration| cleanup_configuration_target(execution, configuration),
+        |configuration| cleanup_configuration_target_with(execution, configuration, remove_dir_if_present),
     )
 }
 
@@ -720,11 +720,6 @@ fn collect_configurations_with(
         collected.push(report);
     }
     Ok(collected)
-}
-
-/// Removes one completed configuration's target while retaining its raw LCOV.
-fn cleanup_configuration_target(execution: &CollectionExecution<'_>, configuration: FeatureConfiguration) -> Result<(), AppError> {
-    cleanup_configuration_target_with(execution, configuration, remove_dir_if_present)
 }
 
 /// Adapts a native removal result to the configuration-cleanup error contract.
@@ -1657,10 +1652,8 @@ mod tests {
     }
 
     #[test]
-    #[cfg_attr(miri, ignore = "exercises native directory cleanup, which Miri isolation does not support")]
-    fn configuration_cleanup_removes_the_selected_target_and_preserves_raw_lcov() {
-        let parent = tempdir().expect("owned collection directory");
-        let workspace = workspace(parent.path());
+    fn configuration_cleanup_removes_only_the_selected_target_and_preserves_raw_lcov() {
+        let workspace = workspace(Path::new("synthetic-workspace"));
         let selection = Selection {
             explicit: false,
             members: workspace.members.clone(),
@@ -1670,7 +1663,7 @@ mod tests {
             cargo: OsString::from("never-invoked"),
             rustc: OsString::from("never-invoked"),
         };
-        let scratch_dir = parent.path().join("scratch");
+        let scratch_dir = PathBuf::from("synthetic-scratch");
         let target_root = scratch_dir.join("cargo-target");
         let execution = CollectionExecution {
             workspace: &workspace,
@@ -1685,15 +1678,21 @@ mod tests {
         let configuration = FeatureConfiguration::AllFeatures;
         let target_dir = configuration_target_dir(&execution, configuration);
         let raw_path = scratch_dir.join(format!("raw-lcov-{}.info", configuration.artifact_name()));
-        fs::create_dir_all(target_dir.join("nested")).expect("create configuration target");
-        fs::write(target_dir.join("nested/profile.profraw"), b"profile").expect("create raw profile");
-        fs::create_dir_all(&scratch_dir).expect("create scratch root");
-        fs::write(&raw_path, RAW_ALL_FEATURES).expect("write completed raw LCOV");
+        let raw_reports = RefCell::new(BTreeMap::from([(raw_path.clone(), RAW_ALL_FEATURES.to_owned())]));
+        let removed = RefCell::new(None);
 
-        cleanup_configuration_target(&execution, configuration).expect("remove completed target");
+        cleanup_configuration_target_with(&execution, configuration, |path| {
+            removed.replace(Some(path.to_path_buf()));
+            Ok(())
+        })
+        .expect("remove completed target");
 
-        assert!(!target_dir.exists(), "the selected configuration target must be removed");
-        assert_eq!(fs::read_to_string(raw_path).expect("read retained raw LCOV"), RAW_ALL_FEATURES);
+        assert_eq!(removed.into_inner(), Some(target_dir));
+        assert_eq!(
+            raw_reports.borrow().get(&raw_path).map(String::as_str),
+            Some(RAW_ALL_FEATURES),
+            "cleanup must not remove the raw LCOV"
+        );
     }
 
     #[test]
