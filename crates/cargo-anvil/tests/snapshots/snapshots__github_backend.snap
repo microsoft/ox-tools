@@ -2603,8 +2603,7 @@ set lists
 # Cargo's inventory is captured once, and only when a setup or validation
 # recipe actually references it.
 installed_cargo_tools := `cargo install --list`
-cargo_binstall_version := replace_regex(installed_cargo_tools, '(?ms)\A.*^cargo-binstall v([^:\r\n]+):\r?$.*\z', '$1')
-cargo_binstall_found := if cargo_binstall_version == installed_cargo_tools { "false" } else { "true" }
+cargo_binstall_found := if which("cargo-binstall") { "true" } else { "false" }
 bolero_command_prefix := if os() == "linux" { "" } else { "# " }
 anvil_nightly_sysroot := shell("rustup run " + rust_nightly + " rustc --print sysroot")
 anvil_nightly_host := shell("rustup run " + rust_nightly + " rustc --print host-tuple")

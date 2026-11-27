@@ -10,6 +10,7 @@
 
 - 🐛 Bug Fixes
 
+  - cargo-anvil: recognize prebundled binary installer
   - cargo-anvil: enable list settings in image bootstrap
   - cargo-anvil: use documented list-to-string conversion
   - cargo-anvil: join list-valued container arguments
@@ -21,6 +22,7 @@
 
 - ✔️ Tasks
 
+  - cargo-anvil: regenerate bootstrap setting artifacts
   - cargo-anvil: regenerate list conversion artifacts
   - cargo-anvil: regenerate list argument artifacts
   - cargo-anvil: reconcile consolidated main catalog
