@@ -2,7 +2,7 @@
 
 ## [Unreleased]
 
-## [0.29.4] - 2026-11-27
+## [0.29.5] - 2026-11-27
 
 - 📚 Documentation
 
@@ -10,7 +10,6 @@
 
 - ✔️ Tasks
 
-  - update Anvil to cargo-gamma 0.8.0 ([#400](https://github.com/microsoft/ox-tools/pull/400))
   - cargo-anvil: regenerate split deny check artifacts
   - cargo-anvil: release 0.28.0 and regenerate scheduled deny routing
 
@@ -21,12 +20,23 @@
 
 - 🧩 Miscellaneous
 
+  - Merge main and preserve deny split with test-feature checks
   - Merge main and preserve deny split with gamma 0.8.0
   - Merge main and preserve deny split with portable recipes
   - Merge main and preserve deny split with unused-deps checks
   - Merge main and preserve deny split with disk diagnostics
   - Merge main and preserve cargo-deny advisory split
   - Merge main and reconcile cargo-anvil 0.29.0 catalog
+
+## [0.29.1] - 2026-11-27
+
+- ✨ Features
+
+  - cargo-anvil: guard publishable crates against test features ([#385](https://github.com/microsoft/ox-tools/pull/385))
+
+- ✔️ Tasks
+
+  - update Anvil to cargo-gamma 0.8.0 ([#400](https://github.com/microsoft/ox-tools/pull/400))
 
 ## [0.29.0] - 2026-11-27
 
