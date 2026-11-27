@@ -5,7 +5,6 @@
 #![doc = include_str!("../docs/cli.md")]
 
 use std::collections::BTreeMap;
-use std::ffi::OsString;
 use std::io::{self, Read};
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -50,15 +49,15 @@ fn main() -> ExitCode {
 }
 
 fn check_release_dependencies(input: impl Read, temp_dir: Option<PathBuf>) -> Result<(), Box<dyn std::error::Error>> {
-    check_release_dependencies_with(input, temp_dir, |invocation_dir, child_env, temp_dir| {
-        CargoInvoker::discover(invocation_dir, child_env, temp_dir.as_deref())
+    check_release_dependencies_with(input, temp_dir, |invocation_dir, temp_dir| {
+        CargoInvoker::discover(invocation_dir, BTreeMap::new(), temp_dir.as_deref())
     })
 }
 
 fn check_release_dependencies_with(
     mut input: impl Read,
     temp_dir: Option<PathBuf>,
-    discover: impl FnOnce(PathBuf, BTreeMap<OsString, OsString>, Option<PathBuf>) -> Result<CargoInvoker, Box<dyn std::error::Error>>,
+    discover: impl FnOnce(PathBuf, Option<PathBuf>) -> Result<CargoInvoker, Box<dyn std::error::Error>>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let mut report = String::new();
     input.read_to_string(&mut report)?;
@@ -68,11 +67,7 @@ fn check_release_dependencies_with(
         return Ok(());
     }
 
-    let mut child_env = BTreeMap::<OsString, OsString>::new();
-    if let Some(home) = std::env::var_os("CARGO_HOME") {
-        child_env.insert("CARGO_HOME".into(), home);
-    }
-    let cargo = discover(std::env::current_dir()?, child_env, temp_dir)?;
+    let cargo = discover(std::env::current_dir()?, temp_dir)?;
     check(candidates, cargo)
 }
 
@@ -84,7 +79,7 @@ mod tests {
 
     #[test]
     fn accepts_an_empty_report_without_discovering_a_workspace() {
-        check_release_dependencies_with(Cursor::new("[]"), None, |_, _, _| {
+        check_release_dependencies_with(Cursor::new("[]"), None, |_, _| {
             panic!("an empty report attempted workspace discovery")
         })
         .unwrap();
@@ -92,7 +87,7 @@ mod tests {
 
     #[test]
     fn rejects_non_utf8_report_input() {
-        let error = check_release_dependencies_with(Cursor::new([0xff]), None, |_, _, _| {
+        let error = check_release_dependencies_with(Cursor::new([0xff]), None, |_, _| {
             panic!("an invalid report attempted workspace discovery")
         })
         .unwrap_err();
@@ -101,7 +96,7 @@ mod tests {
 
     #[test]
     fn rejects_an_invalid_report_without_discovering_a_workspace() {
-        let error = check_release_dependencies_with(Cursor::new(r#"[{"name":"peer"}]"#), None, |_, _, _| {
+        let error = check_release_dependencies_with(Cursor::new(r#"[{"name":"peer"}]"#), None, |_, _| {
             panic!("an invalid report attempted workspace discovery")
         })
         .unwrap_err();

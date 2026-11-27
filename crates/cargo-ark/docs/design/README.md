@@ -39,6 +39,10 @@ The `cargo_ark` library implements release dependency validation in `check`.
 The CLI validates the report with `Candidates::from_report` and, if there
 are candidates, uses `CargoInvoker::discover` to locate the workspace and
 prepare Cargo. The CLI passes both inputs to `check` and reports the result.
+Discovery resolves relative `CARGO_HOME` values against the invocation
+directory, whether inherited from the environment or supplied as an override.
+An explicit override takes precedence, including an empty value, which lets
+Cargo use its default.
 The invoker owns the scratch directory and is consumed by `check`, tying that
 directory to one run. Callers with a known workspace and toolchain can use
 `CargoInvoker::new` to skip discovery. Integration tests use this path: `check`

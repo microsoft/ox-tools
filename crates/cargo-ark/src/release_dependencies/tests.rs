@@ -13,7 +13,7 @@ fn probe_output(status: ExitStatus, stdout: &[u8]) -> Output {
 
 fn discovery_error(probes: impl IntoIterator<Item = (&'static str, Output)>) -> Box<dyn std::error::Error> {
     let mut probes = probes.into_iter();
-    let error = CargoInvoker::discover_with(PathBuf::from("."), BTreeMap::new(), None, |command| {
+    let error = CargoInvoker::discover_with(PathBuf::from("."), BTreeMap::new(), None, None, |command| {
         let (program, output) = probes.next().expect("discovery ran a probe beyond the scripted failure");
         assert_eq!(command.get_program(), program);
         Ok(output)
@@ -50,53 +50,45 @@ fn rejects_non_utf8_probe_output() {
 }
 
 #[test]
-fn discovery_leaves_cargo_home_to_cargo_when_unset_or_empty() -> Result<()> {
-    for home in [None, Some(OsString::new())] {
-        let temp = tempfile::tempdir()?;
-        let invocation = temp.path().join("invocation");
-        let workspace = temp.path().join("workspace");
-        fs::create_dir(&invocation)?;
-        fs::create_dir(&workspace)?;
-        let manifest = workspace.join("Cargo.toml");
-        let mut child_env = BTreeMap::new();
-        if let Some(home) = home {
-            child_env.insert("CARGO_HOME".into(), home);
-        }
-        let cargo = CargoInvoker::discover_with(invocation.clone(), child_env, Some(temp.path()), |command| {
-            match command.get_program().to_str() {
-                Some("cargo") => Ok(probe_output(ExitStatus::default(), manifest.to_string_lossy().as_bytes())),
-                Some("rustc") => Ok(probe_output(ExitStatus::default(), b"workspace-toolchain\n")),
-                _ => panic!("unexpected discovery probe: {command:?}"),
-            }
-        })?;
-        assert!(cargo.command().get_envs().all(|(name, _)| name != OsStr::new("CARGO_HOME")));
-        assert_eq!(cargo.root, workspace.canonicalize()?);
-        assert_eq!(cargo.command().get_current_dir(), Some(cargo.root.as_path()));
-        assert_eq!(cargo.scratch.path().parent().unwrap().canonicalize()?, temp.path().canonicalize()?);
-    }
-    Ok(())
-}
-
-#[test]
-fn resolves_relative_cargo_home_from_the_invocation_directory() -> Result<()> {
+fn discovery_resolves_cargo_home_before_switching_to_the_workspace() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let invocation = temp.path().join("invocation");
     let workspace = temp.path().join("workspace");
     fs::create_dir(&invocation)?;
     fs::create_dir(&workspace)?;
     let manifest = workspace.join("Cargo.toml");
-    let child_env = BTreeMap::from([("CARGO_HOME".into(), "cache".into())]);
-    let cargo = CargoInvoker::discover_with(invocation.clone(), child_env, Some(temp.path()), |command| {
-        match command.get_program().to_str() {
-            Some("cargo") => Ok(probe_output(ExitStatus::default(), manifest.to_string_lossy().as_bytes())),
-            Some("rustc") => Ok(probe_output(ExitStatus::default(), b"workspace-toolchain\n")),
-            _ => panic!("unexpected discovery probe: {command:?}"),
-        }
-    })?;
-    let command = cargo.command();
-    let env = command.get_envs().collect::<BTreeMap<_, _>>();
-    let expected = std::path::absolute(invocation.join("cache"))?;
-    assert_eq!(env.get(OsStr::new("CARGO_HOME")).copied().flatten(), Some(expected.as_os_str()));
+    let key = OsStr::new("CARGO_HOME");
+    for (override_home, inherited, expected) in [
+        (None, None, None),
+        (None, Some("cache"), Some(invocation.join("cache").into_os_string())),
+        (Some("override"), Some("cache"), Some(invocation.join("override").into_os_string())),
+        (Some(""), Some("cache"), Some(OsString::new())),
+    ] {
+        let child_env = override_home.into_iter().map(|home| (key.to_owned(), home.into())).collect();
+        let assert_cargo_home = |command: &Command| {
+            let actual = command.get_envs().find(|(name, _)| *name == key).and_then(|(_, value)| value);
+            assert_eq!(actual, expected.as_deref());
+        };
+        let cargo = CargoInvoker::discover_with(
+            invocation.clone(),
+            child_env,
+            inherited.map(Into::into),
+            Some(temp.path()),
+            |command| {
+                assert_cargo_home(command);
+                match command.get_program().to_str() {
+                    Some("cargo") => Ok(probe_output(ExitStatus::default(), manifest.to_string_lossy().as_bytes())),
+                    Some("rustc") => Ok(probe_output(ExitStatus::default(), b"workspace-toolchain\n")),
+                    _ => panic!("unexpected discovery probe: {command:?}"),
+                }
+            },
+        )?;
+        assert_eq!(cargo.root, workspace.canonicalize()?);
+        let command = cargo.command();
+        assert_eq!(command.get_current_dir(), Some(cargo.root.as_path()));
+        assert_cargo_home(&command);
+        assert_eq!(cargo.scratch.path().parent().unwrap().canonicalize()?, temp.path().canonicalize()?);
+    }
     Ok(())
 }
 

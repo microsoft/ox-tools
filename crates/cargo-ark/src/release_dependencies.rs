@@ -181,33 +181,37 @@ impl CargoInvoker {
 
     /// Discovers a workspace and prepares one Cargo invocation context.
     ///
-    /// Discovery starts in `invocation_dir`. Any `CARGO_HOME` in `child_env`
-    /// is made absolute relative to that directory. `temp_dir`, when present,
-    /// selects the existing parent directory for the private scratch area.
+    /// Discovery starts in `invocation_dir`. A `CARGO_HOME` override in
+    /// `child_env` takes precedence over the inherited environment. A nonempty
+    /// value is made absolute relative to `invocation_dir` before running
+    /// Cargo. `temp_dir`, when present, selects the existing parent directory
+    /// for the private scratch area.
     ///
     /// # Errors
     ///
-    /// Returns an error if the invocation directory or scratch parent cannot
-    /// be used, Cargo or rustc cannot be executed, discovery reports a failure,
-    /// or the scratch parent resolves to the workspace itself or a child
-    /// directory.
+    /// Returns an error if the invocation directory, `CARGO_HOME`, or scratch
+    /// parent cannot be resolved, Cargo or rustc cannot be executed, discovery
+    /// reports a failure, or the scratch parent resolves to the workspace
+    /// itself or a child directory.
     pub fn discover(invocation_dir: PathBuf, child_env: BTreeMap<OsString, OsString>, temp_dir: Option<&Path>) -> Result<Self> {
-        Self::discover_with(invocation_dir, child_env, temp_dir, Command::output)
+        Self::discover_with(invocation_dir, child_env, std::env::var_os("CARGO_HOME"), temp_dir, Command::output)
     }
 
     fn discover_with(
         invocation_dir: PathBuf,
         mut child_env: BTreeMap<OsString, OsString>,
+        inherited_cargo_home: Option<OsString>,
         temp_dir: Option<&Path>,
         mut run_output: impl FnMut(&mut Command) -> io::Result<Output>,
     ) -> Result<Self> {
         let invocation_dir = std::path::absolute(invocation_dir)?;
-        if let Some(home) = child_env.remove(OsStr::new("CARGO_HOME"))
-            && !home.is_empty()
-        {
-            let home = PathBuf::from(home);
-            let home = if home.is_absolute() { home } else { invocation_dir.join(home) };
-            child_env.insert("CARGO_HOME".into(), std::path::absolute(home)?.into());
+        if let Some(home) = child_env.remove(OsStr::new("CARGO_HOME")).or(inherited_cargo_home) {
+            let home = if home.is_empty() {
+                home
+            } else {
+                std::path::absolute(invocation_dir.join(home))?.into()
+            };
+            child_env.insert("CARGO_HOME".into(), home);
         }
 
         let mut locate = Command::new("cargo");
