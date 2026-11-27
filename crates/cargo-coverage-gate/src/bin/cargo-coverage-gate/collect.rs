@@ -868,7 +868,7 @@ fn withhold_merged_report_with(path: &Path, remove: impl FnOnce(&Path) -> io::Re
 fn remove_file_if_present_with(path: &Path, remove: impl FnOnce(&Path) -> io::Result<()>) -> io::Result<()> {
     match remove(path) {
         Ok(()) => Ok(()),
-        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(error) if matches!(error.kind(), io::ErrorKind::NotFound | io::ErrorKind::NotADirectory) => Ok(()),
         Err(error) => Err(error),
     }
 }
@@ -1942,8 +1942,10 @@ mod tests {
         .expect("a present merged report is withheld");
         assert!(!stale.get(), "successful removal clears the stale in-memory state");
 
-        withhold_merged_report_with(path, |_| Err(io::Error::from(io::ErrorKind::NotFound)))
-            .expect("missing merged report is already withheld");
+        for absent in [io::ErrorKind::NotFound, io::ErrorKind::NotADirectory] {
+            remove_file_if_present_with(path, |_| Err(io::Error::from(absent)))
+                .expect("an absent or unreachable merged report is already withheld");
+        }
         let error = remove_file_if_present_with(path, |_| Err(io::Error::from(io::ErrorKind::PermissionDenied)))
             .expect_err("other removal failures must propagate");
         assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
