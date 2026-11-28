@@ -1,0 +1,18 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+
+[package]
+name = "ark-fixture-consumer"
+version = "0.1.1"
+edition = "2024"
+license = "MIT"
+description = "Candidate consumer for Ark's integration test"
+
+[dependencies]
+ark-fixture-peer = { path = "../peer", version = "=0.1.1" }
+ark-fixture-stable = { version = "=1.0.0", registry = "fixture" }
+
+[features]
+default = ["baseline"]
+baseline = []
+extra = []

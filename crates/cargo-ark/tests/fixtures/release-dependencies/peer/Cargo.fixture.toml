@@ -1,0 +1,9 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+
+[package]
+name = "ark-fixture-peer"
+version = "0.1.1"
+edition = "2024"
+license = "MIT"
+description = "Unpublished candidate peer for Ark's integration test"

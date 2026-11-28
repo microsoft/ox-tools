@@ -1,0 +1,29 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+
+[package]
+name = "cargo-ark"
+description = "Cargo release utilities"
+version = "0.1.0"
+readme = "README.md"
+keywords = ["cargo", "release", "testing"]
+categories = ["command-line-utilities", "development-tools::cargo-plugins"]
+
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository = "https://github.com/microsoft/ox-tools/tree/main/crates/cargo-ark"
+
+[dependencies]
+clap = { workspace = true, features = ["derive", "std", "help", "usage", "error-context"] }
+flate2 = { workspace = true, features = ["zlib-rs"] }
+serde_json = { workspace = true, features = ["std"] }
+tar.workspace = true
+tempfile.workspace = true
+toml_edit = { workspace = true, features = ["display"] }
+
+# >>> anvil-managed: anvil-lints
+[lints]
+workspace = true
+# <<< anvil-managed: anvil-lints

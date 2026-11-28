@@ -1,0 +1,9 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+
+[package]
+name = "ark-fixture-stable"
+version = "1.0.0"
+edition = "2024"
+license = "MIT"
+description = "Unchanged registry dependency for Ark's integration test"
