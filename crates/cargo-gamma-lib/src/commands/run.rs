@@ -4581,7 +4581,7 @@ mod tests {
         crate::testing::write_project(
             root.as_std_path(),
             &[
-                ("Cargo.toml", include_str!("../../tests/fixtures/completed-recovery/Cargo.toml")),
+                ("Cargo.toml", include_str!("../../tests/fixtures/completed-recovery/Cargo.toml.in")),
                 ("src/lib.rs", source),
             ],
         );

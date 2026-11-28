@@ -3920,12 +3920,16 @@ mod tests {
     }
 
     #[test]
-    fn generation_does_not_enable_dependabot_or_modify_source_repository_policy() {
+    fn generation_leaves_absent_inapplicable_and_opted_out_dependabot_jobs_alone() {
+        let opted_out = concat!(
+            "# anvil: keep-generated-action-updates\n",
+            "version: 2\nupdates:\n- package-ecosystem: github-actions\n  directory: /\n",
+        );
         for (configurations, backends) in [
             ([None, None], vec![Backend::GitHub]),
             ([Some("version: 2\nupdates: []\n"), None], vec![Backend::GitHub]),
             ([Some("not even YAML: ["), None], vec![Backend::Ado]),
-            ([Some(include_str!("../../../.github/dependabot.yml")), None], vec![Backend::GitHub]),
+            ([Some(opted_out), None], vec![Backend::GitHub]),
         ] {
             let (plan, _) = dependabot_plan(configurations, &backends);
             assert_eq!(plan.dry_run_exit_code(), 0);

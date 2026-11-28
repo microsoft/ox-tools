@@ -24,7 +24,6 @@ use core::sync::atomic::{AtomicUsize, Ordering};
 use core::time::Duration;
 use std::ffi::OsString;
 use std::io::{self, Write};
-use std::path::Path;
 use std::process::Command;
 use std::sync::{Mutex, OnceLock, mpsc};
 use std::{fs, panic, thread};
@@ -639,8 +638,7 @@ pub fn helper_binary_path() -> &'static camino::Utf8Path {
 
     BUILT
         .get_or_init(|| {
-            let work = Utf8PathBuf::from_path_buf(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/test-work"))
-                .expect("the target path is UTF-8");
+            let work = test_work();
 
             fs::create_dir_all(work.as_std_path()).expect("the test work directory should be creatable");
 
@@ -810,14 +808,35 @@ impl crate::exec::Events for Recorder {
     }
 }
 
-/// Creates a temporary directory under the workspace target directory.
+/// Shares a scratch directory with other test binaries built in the same target tree.
+fn test_work() -> Utf8PathBuf {
+    let exe = std::env::current_exe().expect("the running test binary has an executable path");
+    test_work_for(Utf8Path::from_path(&exe).expect("the target path is UTF-8"))
+}
+
+fn test_work_for(exe: &Utf8Path) -> Utf8PathBuf {
+    let directory = exe.parent().expect("the running executable has a containing directory");
+    // Both `<profile>/deps` and `<profile>/build/<crate>/<hash>/out` contain test binaries.
+    let artifacts = if directory.ends_with("out") {
+        directory.ancestors().nth(3).filter(|dir| dir.ends_with("build"))
+    } else {
+        Some(directory).filter(|dir| dir.ends_with("deps"))
+    };
+    let target = artifacts.and_then(|dir| dir.ancestors().nth(2)).map_or(directory, |target| {
+        // Keep target triples and tool-specific cache keys out of nested linker paths.
+        target.ancestors().find(|dir| dir.ends_with("target")).unwrap_or(target)
+    });
+    target.join("test-work")
+}
+
+/// Creates a temporary directory under Cargo's target directory.
 ///
 /// Tests that shell out to cargo need their scratch space on the same file system as the target
 /// directory, and keeping it there also means `cargo clean` sweeps up anything a panicking test
 /// leaked.
 #[must_use]
 pub fn workdir(prefix: &str) -> tempfile::TempDir {
-    let work = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/test-work");
+    let work = test_work();
 
     fs::create_dir_all(&work).expect("the test work directory should be creatable");
     tempfile::Builder::new()
@@ -1053,8 +1072,22 @@ mod tests {
     #[cfg(windows)]
     fn fixture_owned_caches_leave_room_for_nested_runtime_artifacts() {
         let checkout = Utf8Path::new(r"D:\copilot\copilot-worktrees\ox-tools-gh\long-descriptive-worktree-for-gamma-tests");
-        for prefix in ["run-contradicted-", "run-in-diff-mnemonic-"] {
-            let root = checkout.join("target/test-work").join(format!("{prefix}abcdef"));
+        for (prefix, binary) in [
+            ("run-contradicted-", "target/debug/deps/test.exe"),
+            (
+                "run-in-diff-mnemonic-",
+                "target/aarch64-pc-windows-msvc/debug/build/cargo-gamma-lib/779e7cd6219f7a8a/out/test.exe",
+            ),
+            (
+                "run-contradicted-",
+                concat!(
+                    "target/anvil/careful/",
+                    "def957107bdfd09bad157459b04b48fd1775e2e28c23e10ff7cc536eccd39cfb",
+                    "/debug/deps/test.exe",
+                ),
+            ),
+        ] {
+            let root = test_work_for(&checkout.join(binary)).join(format!("{prefix}abcdef"));
             let home = owned_cache_home(&root);
             let runtime =
                 gamma_base(&root).join("target/debug/build/cargo-gamma-rt/0123456789abcdef/out/libgamma_rt-0123456789abcdef.rlib");

@@ -68,12 +68,12 @@ fn guard_crate() -> &'static Path {
             //
             // Use the real iterator adapter and type-preserving helpers so this stub cannot
             // introduce compilation failures absent from the vendored runtime.
-            let stub = concat!(
-                "#[inline] pub fn a(_ordinal: u32) -> bool { std::hint::black_box(false) }\n",
-                include_str!("../../cargo-gamma-rt/src/either.rs"),
-                "\n",
-                include_str!("../../cargo-gamma-rt/src/mutation.rs"),
-            );
+            let (_, either) = gamma_rt::embedded::SOURCES
+                .iter()
+                .find(|(path, _)| *path == "either.rs")
+                .expect("the embedded runtime implements its iterator adapter in either.rs");
+            let mutation = include_str!("fixtures/correctness/runtime_mutation.rs");
+            let stub = format!("#[inline] pub fn a(_ordinal: u32) -> bool {{ std::hint::black_box(false) }}\n{either}\n{mutation}");
 
             std::fs::write(&source, stub).expect("the guard stub source must be writable");
 

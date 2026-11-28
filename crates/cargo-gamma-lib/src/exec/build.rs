@@ -577,7 +577,7 @@ mod final_survivor_tests {
             .join("fixtures")
             .join("isolation-graph")
             .join("application");
-        let work = Workspace::adopt(root.clone(), root.join("Cargo.toml/target"));
+        let work = Workspace::adopt(root.clone(), root.join("Cargo.toml.in/target"));
         let (plan, mut converger) = seeded_convergence_plan(&root);
         converger.compiler_exclusions = Some(from_value(json!({"version": 1, "mutants": {}})).unwrap());
         let expected = converger

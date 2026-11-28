@@ -18,99 +18,10 @@ use std::process::Command;
 use assert_cmd::prelude::*;
 use predicates::prelude::*;
 
-fn get_fixture_path(fixture_name: &str) -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("tests")
-        .join("fixtures")
-        .join(fixture_name)
-}
-
-#[test]
-#[cfg_attr(miri, ignore)]
-fn test_workspace_with_cycle() {
-    let fixture_path = get_fixture_path("with_cycle");
-    let manifest_path = fixture_path.join("Cargo.toml");
-
-    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("cargo-ensure-no-cyclic-deps"));
-    cmd.arg("ensure-no-cyclic-deps").arg("--manifest-path").arg(manifest_path);
-
-    cmd.assert().failure().code(1).stderr(predicate::str::diff(
-        "Error: Cyclic dependencies detected!\n\nCycle 1:\n  crate_a -> crate_b -> crate_c -> crate_a\n\n",
-    ));
-}
-
-#[test]
-#[cfg_attr(miri, ignore)]
-fn test_workspace_without_cycle() {
-    let fixture_path = get_fixture_path("without_cycle");
-    let manifest_path = fixture_path.join("Cargo.toml");
-
-    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("cargo-ensure-no-cyclic-deps"));
-    cmd.arg("ensure-no-cyclic-deps").arg("--manifest-path").arg(manifest_path);
-
-    cmd.assert()
-        .success()
-        .stdout(predicate::str::contains("No cyclic dependencies found."));
-}
-
-#[test]
-#[cfg_attr(miri, ignore)]
-fn test_workspace_with_dev_cycle() {
-    let fixture_path = get_fixture_path("with_dev_cycle");
-    let manifest_path = fixture_path.join("Cargo.toml");
-
-    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("cargo-ensure-no-cyclic-deps"));
-    cmd.arg("ensure-no-cyclic-deps").arg("--manifest-path").arg(manifest_path);
-
-    cmd.assert()
-        .failure()
-        .code(1)
-        .stderr(predicate::str::contains("Error: Cyclic dependencies detected!"))
-        .stderr(predicate::str::contains("Cycle 1:"))
-        .stderr(predicate::str::contains("lib_main").and(predicate::str::contains("lib_test_helpers")));
-}
-
-#[test]
-#[cfg_attr(miri, ignore)]
-fn test_workspace_with_self_dev_dependency() {
-    let fixture_path = get_fixture_path("with_self_dev_dep");
-    let manifest_path = fixture_path.join("Cargo.toml");
-
-    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("cargo-ensure-no-cyclic-deps"));
-    cmd.arg("ensure-no-cyclic-deps").arg("--manifest-path").arg(manifest_path);
-
-    cmd.assert().failure().code(1).stderr(predicate::str::diff(
-        "Error: Cyclic dependencies detected!\n\nCycle 1:\n  self_dep_crate -> self_dep_crate\n\n",
-    ));
-}
-
-#[test]
-#[cfg_attr(miri, ignore)]
-fn test_command_without_manifest_path() {
-    // This test runs in the current workspace
-    // which should not have cycles
-    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("cargo-ensure-no-cyclic-deps"));
-    cmd.arg("ensure-no-cyclic-deps");
-
-    // We expect success since the oxidizer workspace shouldn't have cycles
-    cmd.assert().success();
-}
-
-#[test]
-#[cfg_attr(miri, ignore)]
-fn test_command_without_() {
-    // This test runs in the current workspace
-    // which should not have cycles
-    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("cargo-ensure-no-cyclic-deps"));
-
-    // We expect success since the oxidizer workspace shouldn't have cycles
-    cmd.assert().success();
-}
-
 #[test]
 #[cfg_attr(miri, ignore)]
 fn missing_manifest_reports_metadata_context() {
-    let missing_manifest = get_fixture_path("does-not-exist").join("Cargo.toml");
+    let missing_manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml/does-not-exist/Cargo.toml");
     let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("cargo-ensure-no-cyclic-deps"));
     cmd.arg("ensure-no-cyclic-deps").arg("--manifest-path").arg(missing_manifest);
 

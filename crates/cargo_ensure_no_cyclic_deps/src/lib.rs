@@ -70,6 +70,7 @@
 )]
 
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::fmt;
 use std::process::ExitCode;
 
 use cargo_metadata::{Metadata, MetadataCommand, PackageId};
@@ -113,8 +114,11 @@ enum Command {
 /// # Errors
 /// Returns an error if cargo metadata cannot be loaded or processed
 pub fn run() -> Result<ExitCode, AppError> {
-    let cli = Cli::parse();
+    let loaded = metadata_command(Cli::parse()).exec();
+    evaluate_metadata(loaded, |line| println!("{line}"), |line| eprintln!("{line}"))
+}
 
+fn metadata_command(cli: Cli) -> MetadataCommand {
     let manifest_path = match cli.cmd {
         Some(Command::EnsureNoCyclicDeps { manifest_path }) => manifest_path,
         None => {
@@ -130,24 +134,27 @@ pub fn run() -> Result<ExitCode, AppError> {
     }
     // Use --no-deps to avoid Cargo resolving dependencies (which would fail on cycles)
     cmd.no_deps();
-
-    evaluate_metadata(cmd.exec())
+    cmd
 }
 
-fn evaluate_metadata(loaded: Result<Metadata, cargo_metadata::Error>) -> Result<ExitCode, AppError> {
+fn evaluate_metadata(
+    loaded: Result<Metadata, cargo_metadata::Error>,
+    mut stdout: impl FnMut(fmt::Arguments<'_>),
+    mut stderr: impl FnMut(fmt::Arguments<'_>),
+) -> Result<ExitCode, AppError> {
     let metadata = loaded.into_app_err("Failed to load cargo metadata")?;
 
     let cycles = detect_cycles(&metadata);
 
     if cycles.is_empty() {
-        println!("No cyclic dependencies found.");
+        stdout(format_args!("No cyclic dependencies found."));
         Ok(ExitCode::SUCCESS)
     } else {
-        eprintln!("Error: Cyclic dependencies detected!\n");
+        stderr(format_args!("Error: Cyclic dependencies detected!\n"));
         for (i, cycle) in cycles.iter().enumerate() {
-            eprintln!("Cycle {}:", i + 1);
-            eprintln!("  {}", format_cycle(cycle, &metadata));
-            eprintln!();
+            stderr(format_args!("Cycle {}:", i + 1));
+            stderr(format_args!("  {}", format_cycle(cycle, &metadata)));
+            stderr(format_args!(""));
         }
         Ok(ExitCode::FAILURE)
     }
@@ -160,8 +167,12 @@ mod campaign_tests {
 
     #[test]
     fn metadata_execution_failure_returns_context_instead_of_panicking() {
-        let error = evaluate_metadata(Err(cargo_metadata::Error::Io(std::io::Error::other("metadata unavailable"))))
-            .expect_err("Cargo metadata execution errors propagate");
+        let error = evaluate_metadata(
+            Err(cargo_metadata::Error::Io(std::io::Error::other("metadata unavailable"))),
+            |_| panic!("failed metadata must not report a verdict"),
+            |_| panic!("failed metadata must not report cycles"),
+        )
+        .expect_err("Cargo metadata execution errors propagate");
         assert!(error.to_string().contains("Failed to load cargo metadata"), "{error}");
     }
 }
@@ -285,7 +296,76 @@ fn format_cycle(cycle: &[PackageId], metadata: &Metadata) -> String {
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
+    use std::fmt::Write as _;
+
     use super::*;
+
+    #[test]
+    fn both_invocation_forms_leave_manifest_discovery_to_cargo() {
+        for args in [vec!["cargo-ensure-no-cyclic-deps"], vec!["cargo", "ensure-no-cyclic-deps"]] {
+            let cmd = metadata_command(Cli::parse_from(args)).cargo_command();
+            assert_eq!(cmd.get_current_dir(), None);
+            assert_eq!(
+                cmd.get_args().collect::<Vec<_>>(),
+                ["metadata", "--format-version", "1", "--no-deps"]
+            );
+        }
+        let cmd = metadata_command(Cli::parse_from([
+            "cargo",
+            "ensure-no-cyclic-deps",
+            "--manifest-path",
+            "member/Cargo.toml",
+        ]))
+        .cargo_command();
+        assert_eq!(
+            cmd.get_args().collect::<Vec<_>>(),
+            [
+                "metadata",
+                "--format-version",
+                "1",
+                "--no-deps",
+                "--manifest-path",
+                "member/Cargo.toml"
+            ]
+        );
+    }
+
+    #[test]
+    fn reports_workspace_cycles_including_dev_dependencies() {
+        for (fixture, cycle) in [
+            (
+                include_str!("../tests/fixtures/with_cycle.json"),
+                Some("crate_a -> crate_b -> crate_c -> crate_a"),
+            ),
+            (include_str!("../tests/fixtures/without_cycle.json"), None),
+            (
+                include_str!("../tests/fixtures/with_dev_cycle.json"),
+                Some("lib_main -> lib_test_helpers -> lib_main"),
+            ),
+            (
+                include_str!("../tests/fixtures/with_self_dev_dep.json"),
+                Some("self_dep_crate -> self_dep_crate"),
+            ),
+        ] {
+            let mut stdout = String::new();
+            let mut stderr = String::new();
+            let code = evaluate_metadata(
+                MetadataCommand::parse(fixture),
+                |line| writeln!(stdout, "{line}").expect("writing to a String is infallible"),
+                |line| writeln!(stderr, "{line}").expect("writing to a String is infallible"),
+            )
+            .expect("fixtures contain Cargo metadata");
+            if let Some(cycle) = cycle {
+                assert_eq!(code, ExitCode::FAILURE);
+                assert_eq!(stdout, "");
+                assert_eq!(stderr, format!("Error: Cyclic dependencies detected!\n\nCycle 1:\n  {cycle}\n\n"));
+            } else {
+                assert_eq!(code, ExitCode::SUCCESS);
+                assert_eq!(stdout, "No cyclic dependencies found.\n");
+                assert_eq!(stderr, "");
+            }
+        }
+    }
 
     #[test]
     fn scc_cycle_ignores_self_loop_on_start_node() {

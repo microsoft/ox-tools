@@ -19,14 +19,7 @@ use cargo_gamma_lib::internals::exec::CargoOptions;
 use cargo_gamma_lib::internals::ops::registry::Selection;
 
 fn directory() -> Utf8PathBuf {
-    Utf8PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("..")
-        .join("cargo-gamma-engine")
-        .join("src")
-        .join("ops")
-        .join("collect")
-        .join("collector")
-        .join("resource")
+    Utf8PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/correctness")
 }
 
 fn digest(bytes: &[u8]) -> String {
@@ -76,12 +69,12 @@ fn cached_native_scans_keep_ids_and_ordinals_and_reject_midcampaign_source_edits
 fn declaration_body_generations_are_separate_from_mutant_and_instrumentation_files() {
     let directory = directory();
     let target = TargetFile {
-        path: "guarded.rs".into(),
-        absolute: directory.join("acceptance").join("guarded.rs"),
+        path: "custom_not.rs".into(),
+        absolute: directory.join("custom_not.rs"),
         package: "fixture".into(),
         source: None,
     };
-    let declaration = directory.join("fixtures").join("helpers.rs");
+    let declaration = directory.join("generation.rs");
     let cfg = CfgSet::unconditional();
     let roots = [target.absolute.clone(), declaration.clone()];
     let scanned = scan(
@@ -105,9 +98,9 @@ fn declaration_body_generations_are_separate_from_mutant_and_instrumentation_fil
 #[test]
 fn declaration_generation_is_retained_from_the_parse_that_supplied_its_body() {
     let directory = directory();
-    let path = directory.join("fixtures").join("helpers.rs");
+    let path = directory.join("generation.rs");
     let cfg = CfgSet::unconditional();
-    let generation = directory.join("acceptance").join("guarded.rs");
+    let generation = directory.join("custom_not.rs");
     let expected = digest(&fs::read(&generation).unwrap());
     let on_disk = digest(&fs::read(&path).unwrap());
     assert_ne!(expected, on_disk);

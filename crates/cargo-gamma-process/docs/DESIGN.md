@@ -119,9 +119,10 @@ therefore covers the complete descendant tree.
   retains both buffers unchanged.
 - Cleanup tests observe EOF on a helper-owned readiness connection, rather than
   inferring termination from the absence of a delayed file write. Fault guards
-  own distinct arming tokens. A private dev-dependency builds the native helper
-  with Cargo's host compiler before tests execute and supplies its exact path;
-  ordinary tests never compile it lazily or depend on a shared helper cache.
+  own distinct arming tokens. The native helper is the package's Cargo build
+  script executable. It records its exact path for the tests, which never
+  compile it lazily or depend on a shared helper cache. There is no separate
+  helper package or installed binary.
 - Before observation, termination, or drop reaps a Unix leader, registry release
   clears its slot and waits for any sweep already holding its extracted identity
   to finish. Slot removal alone does not permit numeric-identity reuse.

@@ -1922,6 +1922,8 @@ fn parse_report(input: &str) -> Result<lcov::Report, CoverageGateError> {
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
+    mod native;
+
     #[cfg(unix)]
     use std::os::unix::process::ExitStatusExt as _;
     #[cfg(windows)]

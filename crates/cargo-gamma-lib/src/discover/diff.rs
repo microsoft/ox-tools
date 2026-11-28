@@ -1312,23 +1312,27 @@ diff --git before/old.rs next/a.rs
         assert!(diff.touches_file(Utf8Path::new("new.rs")), "{diff:?}");
     }
 
+    fn diff_fixture() -> &'static Utf8Path {
+        Utf8Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures"))
+    }
+
     #[test]
     fn a_rename_or_copy_header_preserves_a_real_b_directory_with_or_without_git_prefixes() {
-        let root = Utf8Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join("..");
-        let script = Utf8Path::new("scripts/publish-gh-release.rs");
-        let target = Utf8PathBuf::from("b/scripts/publish-gh-release.rs");
-        assert!(root.join(script).is_file(), "the checked-in standalone script exists");
+        let root = diff_fixture();
+        let script = Utf8Path::new("standalone-diff/script.rs");
+        let target = Utf8PathBuf::from("b/standalone-diff/script.rs");
+        assert!(root.join(script).is_file(), "the fixture contains the standalone script");
 
         for (operation, old, new) in [
-            ("rename", "a/old.rs", "b/b/scripts/publish-gh-release.rs"),
-            ("rename", "old.rs", "b/scripts/publish-gh-release.rs"),
-            ("rename", "old/scripts/publish-gh-release.rs", "b/scripts/publish-gh-release.rs"),
-            ("copy", "a/a/scripts/publish-gh-release.rs", "b/b/scripts/publish-gh-release.rs"),
-            ("copy", "a/scripts/publish-gh-release.rs", "b/scripts/publish-gh-release.rs"),
+            ("rename", "a/old.rs", "b/b/standalone-diff/script.rs"),
+            ("rename", "old.rs", "b/standalone-diff/script.rs"),
+            ("rename", "old/standalone-diff/script.rs", "b/standalone-diff/script.rs"),
+            ("copy", "a/a/standalone-diff/script.rs", "b/b/standalone-diff/script.rs"),
+            ("copy", "a/standalone-diff/script.rs", "b/standalone-diff/script.rs"),
         ] {
             let text = format!("diff --git {old} {new}\n{operation} to {target}\n--- {old}\n+++ {new}\n@@ -1 +1,2 @@\n one\n+two\n");
             let mut diff = Diff::parse(&text);
-            diff.resolve_for_workspace(&root, core::slice::from_ref(&target), &[Utf8PathBuf::from("b")], || {
+            diff.resolve_for_workspace(root, core::slice::from_ref(&target), &[Utf8PathBuf::from("b")], || {
                 panic!("an inventoried destination does not need ownership evidence")
             })
             .unwrap();
@@ -1339,22 +1343,22 @@ diff --git before/old.rs next/a.rs
 
     #[test]
     fn a_guessed_prefix_can_resolve_package_source_but_cannot_skip_a_script() {
-        let root = Utf8Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join("..");
-        let script = Utf8Path::new("scripts/publish-gh-release.rs");
-        let target = Utf8PathBuf::from("b/scripts/publish-gh-release.rs");
-        assert!(root.join(script).is_file(), "the checked-in standalone script exists");
+        let root = diff_fixture();
+        let script = Utf8Path::new("standalone-diff/script.rs");
+        let target = Utf8PathBuf::from("b/standalone-diff/script.rs");
+        assert!(root.join(script).is_file(), "the fixture contains the standalone script");
 
         for metadata in ["", "rename to elsewhere.rs\n", "copy to elsewhere.rs\n"] {
             let text = format!("diff --git old.rs {target}\n{metadata}--- old.rs\n+++ {target}\n@@ -1 +1,2 @@\n one\n+two\n");
             let mut diff = Diff::parse(&text);
-            diff.resolve_for_workspace(&root, core::slice::from_ref(&target), &[Utf8PathBuf::from("b")], || {
+            diff.resolve_for_workspace(root, core::slice::from_ref(&target), &[Utf8PathBuf::from("b")], || {
                 panic!("a guessed prefix must not trigger the ownership check")
             })
             .unwrap();
             assert_eq!(diff.touched, HashMap::from_iter([(target.clone(), vec![2])]), "{text}");
 
             let error = Diff::parse(&text)
-                .resolve_for_workspace(&root, &[], &[], || panic!("a guessed prefix must not trigger the ownership check"))
+                .resolve_for_workspace(root, &[], &[], || panic!("a guessed prefix must not trigger the ownership check"))
                 .expect_err("no mutation candidate matches either spelling");
             assert_unresolved_rust_path(&error, target.as_str());
         }
@@ -1362,21 +1366,17 @@ diff --git before/old.rs next/a.rs
 
     #[test]
     fn a_renamed_standalone_script_requires_reliable_destination_evidence() {
-        let root = Utf8Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join("..");
-        let script = "scripts/publish-gh-release.rs";
+        let root = diff_fixture();
+        let script = "standalone-diff/script.rs";
         assert!(root.join(script).is_file());
 
         for (old, new, metadata) in [
-            (
-                "a/old.rs",
-                "b/scripts/publish-gh-release.rs",
-                "rename to scripts/publish-gh-release.rs\n",
-            ),
+            ("a/old.rs", "b/standalone-diff/script.rs", "rename to standalone-diff/script.rs\n"),
             ("old.rs", script, ""),
         ] {
             let patch = format!("diff --git {old} {new}\n{metadata}--- {old}\n+++ {new}\n@@ -0,0 +1 @@\n+new\n");
             let mut diff = Diff::parse(&patch);
-            diff.resolve_for_workspace(&root, &[], &[], || Ok(HashSet::default())).unwrap();
+            diff.resolve_for_workspace(root, &[], &[], || Ok(HashSet::default())).unwrap();
             assert!(diff.touched.is_empty(), "{patch}");
         }
 
@@ -1385,7 +1385,7 @@ diff --git before/old.rs next/a.rs
             "diff --git a/elsewhere.rs b/elsewhere.rs\nrename to {script}\n--- a/elsewhere.rs\n+++ b/elsewhere.rs\n@@ -0,0 +1 @@\n+new\n"
         );
         let error = Diff::parse(&patch)
-            .resolve_for_workspace(&root, &[], &[], || panic!("conflicting metadata is not ownership evidence"))
+            .resolve_for_workspace(root, &[], &[], || panic!("conflicting metadata is not ownership evidence"))
             .unwrap_err();
         assert_unresolved_rust_path(&error, "b/elsewhere.rs");
     }
@@ -1426,34 +1426,33 @@ diff --git before/old.rs next/a.rs
     #[test]
     fn a_pure_rename_does_not_change_the_next_files_path() {
         let patch = "\
-diff --git old.rs scripts/publish-gh-release.rs
+diff --git old.rs standalone-diff/script.rs
 similarity index 100%
 rename from old.rs
-rename to scripts/publish-gh-release.rs
-diff --git b/scripts/publish-gh-release.rs b/scripts/publish-gh-release.rs
---- b/scripts/publish-gh-release.rs
-+++ b/scripts/publish-gh-release.rs
+rename to standalone-diff/script.rs
+diff --git b/standalone-diff/script.rs b/standalone-diff/script.rs
+--- b/standalone-diff/script.rs
++++ b/standalone-diff/script.rs
 @@ -0,0 +1 @@
 +new
 ";
 
         let diff = Diff::parse(patch);
-        assert!(diff.touches(Utf8Path::new("b/scripts/publish-gh-release.rs"), 1, 1));
-        assert!(!diff.touches_file(Utf8Path::new("scripts/publish-gh-release.rs")));
+        assert!(diff.touches(Utf8Path::new("b/standalone-diff/script.rs"), 1, 1));
+        assert!(!diff.touches_file(Utf8Path::new("standalone-diff/script.rs")));
     }
 
     #[test]
     fn a_guessed_path_is_not_confirmed_by_another_hunk_with_the_same_spelling() {
-        let root = Utf8Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join("..");
-        let exact = "--- a/scripts/publish-gh-release.rs\n+++ b/scripts/publish-gh-release.rs\n@@ -0,0 +1 @@\n+new\n";
-        let guessed =
-            "diff --git old.rs b/scripts/publish-gh-release.rs\n--- old.rs\n+++ b/scripts/publish-gh-release.rs\n@@ -1,0 +2 @@\n+new\n";
+        let root = diff_fixture();
+        let exact = "--- a/standalone-diff/script.rs\n+++ b/standalone-diff/script.rs\n@@ -0,0 +1 @@\n+new\n";
+        let guessed = "diff --git old.rs b/standalone-diff/script.rs\n--- old.rs\n+++ b/standalone-diff/script.rs\n@@ -1,0 +2 @@\n+new\n";
 
         for patch in [format!("{exact}{guessed}"), format!("{guessed}{exact}")] {
             let error = Diff::parse(&patch)
-                .resolve_for_workspace(&root, &[], &[], || panic!("one hunk still relies on a guessed prefix"))
+                .resolve_for_workspace(root, &[], &[], || panic!("one hunk still relies on a guessed prefix"))
                 .unwrap_err();
-            assert_unresolved_rust_path(&error, "b/scripts/publish-gh-release.rs");
+            assert_unresolved_rust_path(&error, "b/standalone-diff/script.rs");
         }
     }
 
@@ -1507,54 +1506,48 @@ diff --git b/scripts/publish-gh-release.rs b/scripts/publish-gh-release.rs
 
     #[test]
     fn an_exact_standalone_script_does_not_select_a_source_with_the_same_suffix() {
-        let root = Utf8Path::new(env!("CARGO_MANIFEST_DIR"))
-            .parent()
-            .and_then(Utf8Path::parent)
-            .expect("the crate is two levels below the workspace root");
-        let script = Utf8Path::new("scripts/publish-gh-release.rs");
-        assert!(root.join(script).is_file(), "the checked-in standalone script exists");
+        let root = diff_fixture();
+        let script = Utf8Path::new("standalone-diff/script.rs");
+        assert!(root.join(script).is_file(), "the fixture contains the standalone script");
         let text = concat!(
-            "diff --git a/scripts/publish-gh-release.rs b/scripts/publish-gh-release.rs\n",
-            "--- a/scripts/publish-gh-release.rs\n",
-            "+++ b/scripts/publish-gh-release.rs\n",
+            "diff --git a/standalone-diff/script.rs b/standalone-diff/script.rs\n",
+            "--- a/standalone-diff/script.rs\n",
+            "+++ b/standalone-diff/script.rs\n",
             "@@ -1 +1,2 @@\n",
             " old\n",
             "+new\n",
-            "diff --git a/README.md b/README.md\n",
-            "--- a/README.md\n",
-            "+++ b/README.md\n",
+            "diff --git a/dispatch-valid.txt b/dispatch-valid.txt\n",
+            "--- a/dispatch-valid.txt\n",
+            "+++ b/dispatch-valid.txt\n",
             "@@ -1 +1,2 @@\n",
             " old\n",
             "+new\n",
         );
         let mut diff = Diff::parse(text);
-        let suffix = Utf8PathBuf::from("publish-gh-release.rs");
+        let suffix = Utf8PathBuf::from("script.rs");
 
         diff.resolve_for_workspace(
             root,
             core::slice::from_ref(&suffix),
-            &[Utf8PathBuf::from("crates/cargo-gamma-lib")],
+            &[Utf8PathBuf::from("standalone-diff/owned")],
             || Ok(HashSet::default()),
         )
         .expect("a standalone script is understood without becoming a mutation candidate");
 
         assert!(!diff.touches_file(script));
         assert!(!diff.touches_file(&suffix));
-        assert!(diff.touches_file(Utf8Path::new("README.md")));
+        assert!(diff.touches_file(Utf8Path::new("dispatch-valid.txt")));
     }
 
     #[test]
     fn a_standalone_script_makes_a_diff_with_an_unmatched_non_rust_path_understood() {
-        let root = Utf8Path::new(env!("CARGO_MANIFEST_DIR"))
-            .parent()
-            .and_then(Utf8Path::parent)
-            .expect("the crate is two levels below the workspace root");
+        let root = diff_fixture();
         let mut diff = Diff::parse(concat!(
-            "--- scripts/publish-gh-release.rs\n+++ scripts/publish-gh-release.rs\n@@ -0,0 +1 @@\n+new\n",
+            "--- standalone-diff/script.rs\n+++ standalone-diff/script.rs\n@@ -0,0 +1 @@\n+new\n",
             "--- deleted-doc-for-diff-test.md\n+++ deleted-doc-for-diff-test.md\n@@ -0,0 +1 @@\n+new\n",
         ));
 
-        diff.resolve_for_workspace(root, &[], &[Utf8PathBuf::from("crates/cargo-gamma-lib")], || Ok(HashSet::default()))
+        diff.resolve_for_workspace(root, &[], &[Utf8PathBuf::from("standalone-diff/owned")], || Ok(HashSet::default()))
             .expect("the script makes this diff understood without selecting any file");
         assert_eq!(diff.touched, HashMap::default());
     }
@@ -1573,36 +1566,33 @@ diff --git b/scripts/publish-gh-release.rs b/scripts/publish-gh-release.rs
 
     #[test]
     fn an_exact_module_target_does_not_fall_through_to_a_suffix_match() {
-        let root = Utf8Path::new(env!("CARGO_MANIFEST_DIR"))
-            .parent()
-            .and_then(Utf8Path::parent)
-            .expect("the crate is two levels below the workspace root");
-        let script = Utf8Path::new("scripts/publish-gh-release.rs");
+        let root = diff_fixture();
+        let script = Utf8Path::new("standalone-diff/script.rs");
         let module_targets = HashSet::from_iter([crate::discover::modules::identity(&root.join(script))]);
-        let text = "--- a/scripts/publish-gh-release.rs\n+++ b/scripts/publish-gh-release.rs\n@@ -1 +1,2 @@\n old\n+new\n";
+        let text = "--- a/standalone-diff/script.rs\n+++ b/standalone-diff/script.rs\n@@ -1 +1,2 @@\n old\n+new\n";
         let mut diff = Diff::parse(text);
 
         let error = diff
             .resolve_for_workspace(
                 root,
-                &[Utf8PathBuf::from("publish-gh-release.rs")],
-                &[Utf8PathBuf::from("crates/cargo-gamma-lib")],
+                &[Utf8PathBuf::from("script.rs")],
+                &[Utf8PathBuf::from("standalone-diff/owned")],
                 || Ok(module_targets.clone()),
             )
             .expect_err("a direct module target is mutation source");
 
-        assert_unresolved_rust_path(&error, "b/scripts/publish-gh-release.rs");
+        assert_unresolved_rust_path(&error, "b/standalone-diff/script.rs");
     }
 
     #[test]
     fn an_exact_inventoried_target_does_not_require_module_evidence() {
-        let root = Utf8Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join("..");
-        let text = "--- a/./scripts/publish-gh-release.rs\n+++ b/./scripts/publish-gh-release.rs\n@@ -1 +1,2 @@\n old\n+new\n";
+        let root = diff_fixture();
+        let text = "--- a/./standalone-diff/script.rs\n+++ b/./standalone-diff/script.rs\n@@ -1 +1,2 @@\n old\n+new\n";
         let mut diff = Diff::parse(text);
-        let target = Utf8PathBuf::from("scripts/publish-gh-release.rs");
+        let target = Utf8PathBuf::from("standalone-diff/script.rs");
         assert!(root.join(&target).is_file());
 
-        diff.resolve_for_workspace(&root, core::slice::from_ref(&target), &[], || {
+        diff.resolve_for_workspace(root, core::slice::from_ref(&target), &[], || {
             panic!("an inventoried target needs no standalone ownership check")
         })
         .unwrap();
@@ -1628,15 +1618,15 @@ diff --git b/scripts/publish-gh-release.rs b/scripts/publish-gh-release.rs
 
     #[test]
     fn standalone_scripts_share_ownership_evidence_and_propagate_lookup_errors() {
-        let root = Utf8Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join("..");
-        let scripts = ["scripts/publish-gh-release.rs", "scripts/crate-template/src/lib.rs"];
+        let root = diff_fixture();
+        let scripts = ["standalone-diff/script.rs", "standalone-diff/unowned/lib.rs"];
         assert!(scripts.iter().all(|script| root.join(script).is_file()));
         let patch = scripts
             .map(|script| format!("--- a/{script}\n+++ b/{script}\n@@ -0,0 +1 @@\n+new\n"))
             .concat();
         let mut diff = Diff::parse(&patch);
         let mut calls = 0;
-        diff.resolve_for_workspace(&root, &[], &[], || {
+        diff.resolve_for_workspace(root, &[], &[], || {
             calls += 1;
             Ok(HashSet::default())
         })
@@ -1645,7 +1635,7 @@ diff --git b/scripts/publish-gh-release.rs b/scripts/publish-gh-release.rs
         assert!(diff.touched.is_empty());
 
         let error = Diff::parse(&patch)
-            .resolve_for_workspace(&root, &[], &[], || Err(error!("ownership inventory could not be read").usage()))
+            .resolve_for_workspace(root, &[], &[], || Err(error!("ownership inventory could not be read").usage()))
             .unwrap_err();
         assert!(error.is_usage(), "{error}");
         assert_eq!(error.to_string(), "ownership inventory could not be read");
@@ -1653,18 +1643,18 @@ diff --git b/scripts/publish-gh-release.rs b/scripts/publish-gh-release.rs
 
     #[test]
     fn standalone_exemption_requires_an_exact_safe_file_outside_every_package() {
-        let root = Utf8Path::new(env!("CARGO_MANIFEST_DIR"))
-            .parent()
-            .and_then(Utf8Path::parent)
-            .expect("the crate is two levels below the workspace root");
-        let absolute = root.join("scripts/publish-gh-release.rs");
-        let package_directories = [Utf8PathBuf::from("crates/cargo-gamma"), Utf8PathBuf::from("crates/cargo-gamma-lib")];
+        let root = diff_fixture();
+        let absolute = root.join("standalone-diff/script.rs");
+        let package_directories = [
+            Utf8PathBuf::from("standalone-diff/unowned"),
+            Utf8PathBuf::from("standalone-diff/owned"),
+        ];
         for path in [
-            Utf8PathBuf::from("crates/cargo-gamma-lib/src/discover/diff.rs"),
-            Utf8PathBuf::from("./crates/cargo-gamma-lib/src/discover/diff.rs"),
+            Utf8PathBuf::from("standalone-diff/owned/lib.rs"),
+            Utf8PathBuf::from("./standalone-diff/owned/lib.rs"),
             Utf8PathBuf::from("scripts/missing.rs"),
-            Utf8PathBuf::from("prefix/scripts/publish-gh-release.rs"),
-            Utf8PathBuf::from("../ox-tools-gamma-script/scripts/publish-gh-release.rs"),
+            Utf8PathBuf::from("prefix/standalone-diff/script.rs"),
+            Utf8PathBuf::from("../fixtures/standalone-diff/script.rs"),
             absolute,
         ] {
             let text = format!("--- {path}\n+++ {path}\n@@ -1 +1,2 @@\n old\n+new\n");
@@ -1679,12 +1669,12 @@ diff --git b/scripts/publish-gh-release.rs b/scripts/publish-gh-release.rs
             assert_unresolved_rust_path(&error, path.as_str());
         }
 
-        let text = "--- scripts/publish-gh-release.rs\n+++ scripts/publish-gh-release.rs\n@@ -1 +1,2 @@\n old\n+new\n";
+        let text = "--- standalone-diff/script.rs\n+++ standalone-diff/script.rs\n@@ -1 +1,2 @@\n old\n+new\n";
         let mut diff = Diff::parse(text);
         let error = diff
             .resolve_for_workspace(root, &[], &[Utf8PathBuf::new()], || panic!("a root package owns every path"))
             .expect_err("a package whose directory is the workspace root owns every path below it");
-        assert_unresolved_rust_path(&error, "scripts/publish-gh-release.rs");
+        assert_unresolved_rust_path(&error, "standalone-diff/script.rs");
     }
 
     #[test]

@@ -1,0 +1,23 @@
+{
+  "version": 1,
+  "workspace_root": "/ws",
+  "target_directory": "/ws/target",
+  "workspace_members": ["x", "y", "z"],
+  "packages": [
+    {
+      "name": "crate_x", "id": "x", "version": "0.1.0", "manifest_path": "/ws/crate_x/Cargo.toml", "features": {}, "targets": [],
+      "dependencies": [
+        {"name": "crate_y", "req": "*", "kind": null, "optional": false, "uses_default_features": true, "features": []},
+        {"name": "crate_z", "req": "*", "kind": null, "optional": false, "uses_default_features": true, "features": []}
+      ]
+    },
+    {
+      "name": "crate_y", "id": "y", "version": "0.1.0", "manifest_path": "/ws/crate_y/Cargo.toml", "features": {}, "targets": [],
+      "dependencies": [{"name": "crate_z", "req": "*", "kind": null, "optional": false, "uses_default_features": true, "features": []}]
+    },
+    {
+      "name": "crate_z", "id": "z", "version": "0.1.0", "manifest_path": "/ws/crate_z/Cargo.toml", "features": {}, "targets": [],
+      "dependencies": []
+    }
+  ]
+}

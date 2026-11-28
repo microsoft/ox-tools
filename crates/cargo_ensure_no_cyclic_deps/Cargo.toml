@@ -6,6 +6,7 @@ name = "cargo-ensure-no-cyclic-deps"
 description = "A cargo subcommand to detect cyclic dependencies in workspace crates"
 version = "0.2.0"
 readme = "README.md"
+exclude = ["/tests/repository_policy.rs"]
 keywords = ["oxidizer", "cargo", "subcommand", "dependencies", "cycles"]
 categories = ["development-tools::cargo-plugins"]
 

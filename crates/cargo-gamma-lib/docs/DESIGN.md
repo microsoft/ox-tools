@@ -655,7 +655,9 @@ These single samples establish unit counts and the feature-graph counterexample,
 not a campaign speedup. Ambiguous harness contexts therefore keep their original
 target work; they are not narrowed from diagnostic wording or an ordinary
 artifact's presence. Tests exercise this routing in process without launching
-Cargo; the checked-in workspace permits independent manual reproduction.
+Cargo. To reproduce the graph manually, copy `tests/fixtures/isolation-graph` and
+rename each `Cargo.toml.in` in the copy to `Cargo.toml`. The template names keep
+Cargo from omitting the fixture as a nested package when building the crate archive.
 
 There is no narrow-to-wide fallback during exclusion. An unattributed failure is
 reported in its validated context rather than retried with a different feature graph.

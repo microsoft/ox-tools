@@ -7,7 +7,8 @@ use std::process::{Command, Stdio};
 use std::thread;
 
 use cargo_gamma_process::{MemoryRequest, OutputError, ProcessTree, output, output_bounded, prepare};
-use cargo_gamma_process_test_helper::PATH;
+
+const PATH: &str = env!("CARGO_GAMMA_PROCESS_HELPER");
 
 #[test]
 fn terminating_a_native_tree_reaps_its_running_leader() {

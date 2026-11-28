@@ -1491,7 +1491,7 @@ pub(in crate::exec) mod compiler_campaign_tests {
         let manifest = runtime_root.join("Cargo.toml");
         let capture_root = target.join("captures");
         let compiler = base.join(format!("rustc{}", std::env::consts::EXE_SUFFIX));
-        std::fs::copy(cargo_gamma_process_test_helper::PATH, &compiler).unwrap();
+        std::fs::copy(crate::testing::helper_binary_path(), &compiler).unwrap();
         let output = target.join("libgamma_rt-runtime.rmeta");
         let source = runtime_root.join("src").join("lib.rs");
         let mut cargo = Command::new("cargo");

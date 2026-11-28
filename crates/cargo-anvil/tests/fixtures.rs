@@ -48,7 +48,11 @@ fn copy_tree(from: &Path, to: &Path) {
     for entry in walkdir::WalkDir::new(from) {
         let entry = entry.unwrap();
         let rel = entry.path().strip_prefix(from).unwrap();
-        let dest = to.join(rel);
+        let mut dest = to.join(rel);
+        // Cargo skips nested packages. Ship fixture manifests under an inert name.
+        if entry.file_name() == "Cargo.toml.in" {
+            dest.set_file_name("Cargo.toml");
+        }
         if entry.file_type().is_dir() {
             std::fs::create_dir_all(&dest).unwrap();
         } else if entry.file_type().is_file() {

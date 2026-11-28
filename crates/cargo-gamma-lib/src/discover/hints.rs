@@ -2505,27 +2505,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg_attr(coverage_nightly, coverage(off))]
-    fn the_checked_in_workspace_artifact_uses_the_current_readable_schema() {
-        let root = Utf8Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-        let artifact = path(&root);
-
-        if !artifact.exists() {
-            return;
-        }
-
-        let text = fs::read_to_string(&artifact).expect("checked-in hints are UTF-8");
-
-        let grouped = yaml_serde::from_str::<GroupedHints>(&text).expect("checked-in hints use the current YAML schema");
-        let canonical = yaml_serde::to_string(&grouped).expect("checked-in hints can be serialized");
-        assert!(!yaml_requires_rejection(&canonical), "serialized hints contain YAML references");
-        assert!(!yaml_requires_rejection(&text), "checked-in hints contain YAML references");
-        assert_eq!(grouped.version, VERSION);
-        assert!(Hints::valid_tool(&grouped.tool));
-        assert!(!Hints::from_grouped(grouped).expect("valid references").is_empty());
-    }
-
-    #[test]
     fn a_large_artifact_is_scanned_and_deserialized_in_parallel() {
         let mut text = artifact(&[]).rendered().expect("artifact");
         text.push_str("# ");

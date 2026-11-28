@@ -1,0 +1,16 @@
+{
+  "version": 1,
+  "workspace_root": "/ws",
+  "target_directory": "/ws/target",
+  "workspace_members": ["main", "helpers"],
+  "packages": [
+    {
+      "name": "lib_main", "id": "main", "version": "0.1.0", "manifest_path": "/ws/lib_main/Cargo.toml", "features": {}, "targets": [],
+      "dependencies": [{"name": "lib_test_helpers", "req": "*", "kind": "dev", "optional": false, "uses_default_features": true, "features": []}]
+    },
+    {
+      "name": "lib_test_helpers", "id": "helpers", "version": "0.1.0", "manifest_path": "/ws/lib_test_helpers/Cargo.toml", "features": {}, "targets": [],
+      "dependencies": [{"name": "lib_main", "req": "*", "kind": null, "optional": false, "uses_default_features": true, "features": []}]
+    }
+  ]
+}

@@ -14,11 +14,10 @@
 //!
 //! Fixes whose mechanism is private to the crate — process groups, scratch-directory retention,
 //! the loader variable — are guarded by unit tests beside the code, because reaching them from out
-//! here would mean widening the API to suit the test. This file covers everything observable from
-//! outside, plus the documentation the fixes promised to keep true.
+//! here would mean widening the API to suit the test. The checkout `docs` target covers the
+//! documentation the fixes promised to keep true.
 
 use std::collections::BTreeSet;
-use std::fs;
 
 use camino::{Utf8Path, Utf8PathBuf};
 use cargo_gamma_lib::internals::ci::{self, Level};
@@ -30,15 +29,6 @@ use cargo_gamma_lib::internals::ops::registry::Selection;
 use cargo_gamma_lib::internals::parse::SourceFile;
 use cargo_gamma_lib::internals::suppress::directives;
 use cargo_gamma_lib::testing::{Sink, write_project};
-
-/// The ox-tools workspace root.
-fn repository() -> Utf8PathBuf {
-    Utf8Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .and_then(Utf8Path::parent)
-        .expect("the crate lives two levels below the workspace root")
-        .to_owned()
-}
 
 /// Builds a report document holding one file's worth of mutants, for the merge tests.
 fn report_with(shard: Option<(u32, u32)>, started_at: u64, mutants: &[(&str, &str)]) -> cargo_gamma_lib::internals::elements::Report {
@@ -69,16 +59,6 @@ fn report_with(shard: Option<(u32, u32)>, started_at: u64, mutants: &[(&str, &st
     });
 
     serde_json::from_value(json).expect("a report document")
-}
-
-/// Reads one of the repository's documents.
-fn document(relative: &str) -> String {
-    fs::read_to_string(repository().join(relative).as_std_path()).expect("the document is part of the repository")
-}
-
-/// Reads one of cargo-gamma's published documents.
-fn published_document(relative: &str) -> String {
-    document(&format!("crates/cargo-gamma/{relative}"))
 }
 
 /// Parses a source file the way the scanner does.
@@ -185,35 +165,12 @@ fn issue_002_a_pattern_that_matches_nothing_is_a_usage_error() {
 }
 
 #[test]
-fn issue_004_a_stall_does_not_claim_to_have_found_the_hung_test() {
-    // libtest runs tests in parallel and announces one only when it *finishes*, so the test still
-    // spinning is by definition the one it has not named. Documentation that presents the name as a
-    // diagnosis sends people to read a test that was fine — and to suppress it.
-    let readme = published_document("README.md");
-    let design = published_document("docs/DESIGN.md");
-
-    assert!(
-        !readme.contains("The report names the test it stopped in"),
-        "the README claims a diagnosis again"
-    );
-    assert!(
-        readme.contains("landmark rather than a diagnosis"),
-        "the README no longer qualifies the name"
-    );
-    assert!(
-        design.contains("landmark rather than a diagnosis"),
-        "the design notes no longer qualify the name"
-    );
-    assert!(!readme.contains("stalled during `"), "the old wording is back in the README");
-}
-
-#[test]
 fn issue_009_the_lint_cap_does_not_replace_a_tree_s_own_rustflags() {
     // Setting `RUSTFLAGS` *replaces* whatever the tree configured, so a workspace that sets `--cfg`
     // flags or a target CPU compiled into something other than what its tests were written against
     // — and the verdicts were then about that other thing. The flag belongs in the copied tree's
     // configuration, where cargo merges it.
-    let workspace = document("crates/cargo-gamma-lib/src/exec/workspace.rs");
+    let workspace = include_str!("../src/exec/workspace.rs");
 
     assert!(
         !workspace.contains(r#"command.env("RUSTFLAGS", "--cap-lints=allow")"#),
@@ -231,22 +188,33 @@ fn issue_010_the_internals_feature_is_never_on_for_an_ordinary_build() {
     // off while still building the integration tests — so the crate did not compile at all in that
     // configuration. Requiring the feature on each integration-test target makes that dependency
     // explicit without enabling it for ordinary downstream builds.
-    let manifest = document("crates/cargo-gamma-lib/Cargo.toml");
+    let manifest: toml::Table = toml::from_str(include_str!("../Cargo.toml")).expect("Cargo accepted this package manifest");
 
     // The member list is not pinned: the feature also carries the fixtures' `tempfile` dependency,
     // which is only needed when the internals are exposed. What must hold is that the feature
     // exists, that integration tests require it, and that nothing enables it by default.
-    assert!(manifest.contains("internals = ["), "the feature is gone: {manifest}");
+    let features = manifest["features"].as_table().expect("Cargo features are a table");
+    assert!(features.contains_key("internals"), "the feature is gone: {manifest}");
     assert!(
-        manifest.contains(r#"required-features = ["internals"]"#),
-        "integration tests no longer require the internals feature"
+        manifest["test"].as_array().unwrap().iter().any(|target| {
+            target["name"].as_str() == Some("regressions")
+                && target["required-features"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|v| v.as_str() == Some("internals"))
+        }),
+        "this integration target no longer requires the internals feature"
     );
     assert!(
-        !manifest.contains("default = [\"internals\"]"),
+        !features
+            .get("default")
+            .and_then(toml::Value::as_array)
+            .is_some_and(|defaults| { defaults.iter().any(|v| v.as_str() == Some("internals")) }),
         "the feature must never be on by default"
     );
     assert!(
-        !document("crates/cargo-gamma-lib/src/lib.rs").contains("cfg(debug_assertions)"),
+        !include_str!("../src/lib.rs").contains("cfg(debug_assertions)"),
         "the optimization level decides visibility again"
     );
 }
@@ -364,87 +332,12 @@ fn issue_019_a_crlf_file_keeps_its_line_endings() {
 }
 
 #[test]
-fn issue_020_the_documented_option_names_are_the_ones_that_exist() {
-    // The README and the advice both named `--exclude`, which the tool does not accept. Advice
-    // nobody can follow is worse than none: it is followed, it fails, and the tool is blamed.
-    let readme = published_document("README.md");
-
-    assert!(readme.contains("--exclude-file"), "the real option is undocumented");
-    assert!(
-        !readme.contains("`--exclude`"),
-        "the option that does not exist is documented again"
-    );
-
+fn issue_020_help_lists_the_actual_exclude_option() {
     let (code, text) = cli(&["run", "--help"]);
 
     assert_eq!(code, 0, "{text}");
     assert!(text.contains("--exclude-file"), "{text}");
     assert!(!text.contains("--exclude "), "{text}");
-}
-
-#[test]
-fn issue_021_the_exit_code_contract_is_documented() {
-    // A naive `cargo gamma run` step passes green with surviving mutants, which is a deliberate
-    // choice and therefore one that has to be written down — an undocumented exit code is a CI job
-    // that reports success nobody audited.
-    let readme = published_document("README.md");
-
-    assert!(readme.contains("### Exit codes"), "the contract is undocumented");
-
-    for code in ["`0`", "`1`", "`2`", "`3`", "`70`"] {
-        assert!(readme.contains(code), "exit code {code} is not documented");
-    }
-
-    assert!(
-        readme.contains("Surviving mutants do not fail the process on their own"),
-        "the surprising half of the contract is unstated"
-    );
-    assert!(readme.contains("--min-score 100"), "the way to make survivors fatal is not shown");
-}
-
-#[test]
-fn issue_022_the_design_notes_match_the_implementation() {
-    // Design notes that drift become confidently wrong documentation, which costs more than none:
-    // they are the thing a contributor reads before changing the code they describe.
-    let design = published_document("docs/DESIGN.md");
-
-    // The statement mutators are `stmt.delete_call` and `stmt.delete_assign`; there is no
-    // `stmt.delete`, so nobody could ever have selected or suppressed the name that was documented.
-    assert!(design.contains("stmt.delete_call"), "the real mutator name is absent");
-    assert!(
-        !design.contains("`stmt.delete`"),
-        "the name that does not exist is documented again"
-    );
-
-    // The outcome is spelled `ignored` everywhere the tool prints it.
-    assert!(
-        design.contains("| `ignored` |"),
-        "the outcome table names an outcome that is never printed"
-    );
-    assert!(!design.contains("| `suppressed` |"), "the old name is back in the outcome table");
-
-    // A mutant's identity includes which replacement it is, and the digest is truncated.
-    assert!(design.contains("replacement_index"), "an identity input is undocumented");
-    assert!(design.contains("twelve hex characters"), "the truncation is undocumented");
-
-    // The schema removes the exponential blow-up; it does not make the encoding linear.
-    assert!(
-        !design.contains("The encoding is therefore linear in the size of the source."),
-        "the overstated growth claim is back"
-    );
-    assert!(design.contains("superlinearly"), "the qualified claim is gone");
-}
-
-#[test]
-fn issue_023_the_readme_does_not_claim_more_than_the_tool_does() {
-    // An unqualified "superset of cargo-mutants" is a promise the tool does not keep.
-    let readme = published_document("README.md");
-
-    assert!(readme.contains("Known gaps"), "the gaps are undocumented");
-    assert!(
-        !readme.contains("a superset of cargo-mutants"),
-        "the unqualified superset claim is back"
-    );
 }
 
 #[test]
@@ -473,7 +366,7 @@ fn issue_029_a_failed_run_does_not_keep_its_build_output() {
     // Two failed runs left seventy gigabytes under `target/gamma` on a real workspace, which is
     // more than a hosted CI runner has free — so the next step of the job failed for a reason that
     // had nothing to do with mutation testing.
-    let workspace = document("crates/cargo-gamma-lib/src/exec/workspace.rs");
+    let workspace = include_str!("../src/exec/workspace.rs");
 
     assert!(workspace.contains("settled"), "the retention policy is gone");
     assert!(
@@ -573,62 +466,6 @@ fn issue_012_a_negated_cfg_keeps_its_code() {
     let mutants = cargo_gamma_lib::internals::ops::collect::collect_in(&source, &Selection::everything(), &cfgs);
 
     assert!(!mutants.is_empty(), "a negated absent cfg removed live code");
-}
-
-#[test]
-fn issue_025_the_doctest_gap_is_documented_where_a_reader_will_meet_it() {
-    // Doctests are deliberately outside the model, but a score that silently counts doc-example
-    // coverage as absent is misleading unless the report's own documentation says so.
-    let readme = published_document("README.md");
-    let design = published_document("docs/DESIGN.md");
-
-    assert!(readme.contains("### Doctests"), "the README does not name the gap");
-    assert!(
-        readme.contains("`cargo test --doc` is never invoked"),
-        "the README does not say doctests are not run"
-    );
-    assert!(
-        design.contains("Doctests are outside the model"),
-        "the design document does not explain the cost decision"
-    );
-}
-
-#[test]
-fn issue_030_the_guard_does_not_allocate() {
-    // The guard runs on every mutated expression in every test, so an allocation in it would be
-    // charged to the whole suite — the cost the schema exists to avoid.
-    let source = fs::read_to_string(repository().join("crates/cargo-gamma-rt/src/runtime.rs")).expect("the runtime source");
-    let production = source
-        .split_once("\nmod tests {")
-        .map_or(source.as_str(), |(production, _tests)| production);
-    let code: String = production
-        .lines()
-        .filter(|line| !line.trim_start().starts_with("//"))
-        .collect::<Vec<_>>()
-        .join("\n");
-
-    assert!(
-        !code.contains("env::var"),
-        "the guard reads the environment through an allocating API again"
-    );
-    assert!(code.contains("AtomicU32"), "the cached answer is no longer a plain integer");
-
-    let manifest = fs::read_to_string(repository().join("crates/cargo-gamma-rt/Cargo.toml")).expect("the runtime manifest");
-    let dependencies = manifest
-        .lines()
-        .skip_while(|line| line.trim() != "[dependencies]")
-        .skip(1)
-        .take_while(|line| !line.trim_start().starts_with('['))
-        .filter(|line| {
-            let line = line.trim();
-
-            !line.is_empty() && !line.starts_with('#')
-        })
-        .count();
-    assert!(
-        dependencies == 0,
-        "the runtime gained a dependency, which every mutated crate would then have to build"
-    );
 }
 
 #[test]

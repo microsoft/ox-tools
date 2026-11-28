@@ -9,28 +9,27 @@ use std::sync::OnceLock;
 use std::{env, fs};
 
 use cargo_metadata::{Message, TargetKind};
+// The offline consumer loads this target's proc-macro artifact through rustc's --extern.
+use gamma as _;
 
 fn macro_artifact() -> &'static Path {
     static BUILT: OnceLock<PathBuf> = OnceLock::new();
 
     BUILT
         .get_or_init(|| {
-            let manifest = Path::new(env!("CARGO_MANIFEST_DIR"))
-                .parent()
-                .expect("the gamma test crates are workspace siblings")
-                .join("cargo-gamma-attrs")
-                .join("Cargo.toml");
+            // Ask for the host proc-macro that Cargo resolved for this test target. Selecting
+            // the macro as a workspace member instead would fail in the standalone package.
             let built = Command::new(env::var_os("CARGO").unwrap_or_else(|| "cargo".into()))
-                .current_dir(manifest.parent().expect("the constructed macro manifest has a parent directory"))
+                .current_dir(env!("CARGO_MANIFEST_DIR"))
                 .args([
-                    "build",
+                    "check",
                     "--offline",
                     "--locked",
-                    "--lib",
+                    "--all-features",
                     "--message-format=json",
-                    "--manifest-path",
+                    "--test",
+                    env!("CARGO_CRATE_NAME"),
                 ])
-                .arg(&manifest)
                 .output()
                 .expect("Cargo must be runnable to locate the real macro library");
             assert!(

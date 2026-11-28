@@ -1053,10 +1053,7 @@ mod tests {
         miri,
         ignore = "native/cargo-careful retain opt-out comment policy permutations; focused BOM/Unicode parsing and YAML patching remain interpreted"
     )]
-    fn source_repository_keeps_receiving_generated_action_updates() {
-        let source = include_str!("../../../.github/dependabot.yml");
-        assert!(!source.contains("exclude-paths:"));
-        assert!(update(source, PATHS).unwrap().is_none());
+    fn only_a_standalone_opt_out_comment_suppresses_generated_path_exclusions() {
         let opted_out = format!("# source repository\n{KEEP_UPDATES}\n{JOB}");
         for newline in ["\n", "\r\n", "\r"] {
             assert!(update(&opted_out.replace('\n', newline), PATHS).unwrap().is_none());

@@ -2404,23 +2404,7 @@ mod tests {
         let dir = crate_dir("suppress-renamed-");
         let root = Utf8PathBuf::from_path_buf(dir.path().to_path_buf()).expect("utf8");
 
-        if !git(&root, &["init", "--quiet"]) {
-            return;
-        }
-        assert!(git(&root, &["add", "src/lib.rs"]));
-        assert!(git(
-            &root,
-            &[
-                "-c",
-                "user.name=cargo-gamma test",
-                "-c",
-                "user.email=cargo-gamma@example.invalid",
-                "commit",
-                "--quiet",
-                "-m",
-                "fixture",
-            ],
-        ));
+        crate::fixtures::commit_git_fixture(&root, "src/lib.rs");
         assert!(git(&root, &["mv", "src/lib.rs", "src/renamed.rs"]));
 
         let dirty = uncommitted(&root, &[Utf8Path::new("src/renamed.rs")])
