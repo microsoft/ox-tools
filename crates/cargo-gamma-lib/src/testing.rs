@@ -808,7 +808,7 @@ impl crate::exec::Events for Recorder {
     }
 }
 
-/// Shares a scratch directory with other test binaries built in the same target directory.
+/// Shares a scratch directory with other test binaries built in the same target tree.
 fn test_work() -> Utf8PathBuf {
     let exe = std::env::current_exe().expect("the running test binary has an executable path");
     test_work_for(Utf8Path::from_path(&exe).expect("the target path is UTF-8"))
@@ -823,8 +823,8 @@ fn test_work_for(exe: &Utf8Path) -> Utf8PathBuf {
         Some(directory).filter(|dir| dir.ends_with("deps"))
     };
     let target = artifacts.and_then(|dir| dir.ancestors().nth(2)).map_or(directory, |target| {
-        // Strip an explicit target triple as well; relocated test binaries stay in their private directory.
-        target.parent().filter(|parent| parent.ends_with("target")).unwrap_or(target)
+        // Keep target triples and tool-specific cache keys out of nested linker paths.
+        target.ancestors().find(|dir| dir.ends_with("target")).unwrap_or(target)
     });
     target.join("test-work")
 }
@@ -1077,6 +1077,14 @@ mod tests {
             (
                 "run-in-diff-mnemonic-",
                 "target/aarch64-pc-windows-msvc/debug/build/cargo-gamma-lib/779e7cd6219f7a8a/out/test.exe",
+            ),
+            (
+                "run-contradicted-",
+                concat!(
+                    "target/anvil/careful/",
+                    "def957107bdfd09bad157459b04b48fd1775e2e28c23e10ff7cc536eccd39cfb",
+                    "/debug/deps/test.exe",
+                ),
             ),
         ] {
             let root = test_work_for(&checkout.join(binary)).join(format!("{prefix}abcdef"));
