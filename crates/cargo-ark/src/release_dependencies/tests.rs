@@ -12,8 +12,13 @@ fn probe_output(status: ExitStatus, stdout: &[u8]) -> Output {
 }
 
 fn discovery_error(probes: impl IntoIterator<Item = (&'static str, Output)>) -> Box<dyn std::error::Error> {
+    // A verbatim path avoids a host normalization call under Miri.
+    #[cfg(windows)]
+    let invocation = PathBuf::from(r"\\?\C:\workspace");
+    #[cfg(not(windows))]
+    let invocation = PathBuf::from("/workspace");
     let mut probes = probes.into_iter();
-    let error = CargoInvoker::discover_with(PathBuf::from("."), BTreeMap::new(), None, None, |command| {
+    let error = CargoInvoker::discover_with(invocation, BTreeMap::new(), None, None, |command| {
         let (program, output) = probes.next().expect("discovery ran a probe beyond the scripted failure");
         assert_eq!(command.get_program(), program);
         Ok(output)
@@ -21,6 +26,13 @@ fn discovery_error(probes: impl IntoIterator<Item = (&'static str, Output)>) -> 
     .expect_err("the scripted probe results cannot yield a workspace and toolchain");
     assert!(probes.next().is_none(), "discovery stopped before the failing probe");
     error
+}
+
+#[test]
+fn rejects_an_empty_invocation_directory() {
+    let error =
+        CargoInvoker::discover(PathBuf::new(), BTreeMap::new(), None).expect_err("an empty path cannot identify the invocation directory");
+    assert_eq!(error.downcast_ref::<io::Error>().unwrap().kind(), io::ErrorKind::InvalidInput);
 }
 
 #[test]
@@ -50,6 +62,7 @@ fn rejects_non_utf8_probe_output() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore = "uses the host filesystem")]
 fn discovery_resolves_cargo_home_before_switching_to_the_workspace() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let invocation = temp.path().join("invocation");
@@ -100,6 +113,21 @@ fn reads_candidate_versions_and_ignores_discovery_metadata() -> Result<()> {
         BTreeMap::from([("peer".into(), "1.2.0".into())])
     );
     assert!(Candidates::from_report("[]")?.is_empty());
+    Ok(())
+}
+
+#[test]
+#[cfg_attr(miri, ignore = "uses the host filesystem")]
+fn an_empty_report_needs_no_workspace_and_releases_scratch() -> Result<()> {
+    let scratch = tempfile::tempdir()?;
+    let path = scratch.path().to_path_buf();
+    let cargo = CargoInvoker {
+        root: path.join("missing-workspace"),
+        child_env: BTreeMap::new(),
+        scratch,
+    };
+    check(Candidates::from_report("[]")?, cargo)?;
+    assert!(!path.try_exists()?);
     Ok(())
 }
 
@@ -205,6 +233,7 @@ fn reports_when_the_candidate_patch_cannot_be_written() -> Result<()> {
 
 #[cfg(any(unix, windows))]
 #[test]
+#[cfg_attr(miri, ignore = "uses the host filesystem")]
 fn reports_paths_cargo_cannot_represent_in_patch_toml() {
     #[cfg(unix)]
     let directory = {
@@ -246,7 +275,7 @@ fn reports_when_the_required_cargo_process_cannot_start() {
 }
 
 #[test]
-#[cfg_attr(all(miri, windows), ignore = "Windows Command environment uses CompareStringOrdinal")]
+#[cfg_attr(miri, ignore = "uses the host filesystem")]
 fn commands_use_workspace_config_and_keep_builds_in_scratch() -> Result<()> {
     let root = tempfile::tempdir()?;
     let scratch = tempfile::tempdir()?;
@@ -287,6 +316,7 @@ fn commands_use_workspace_config_and_keep_builds_in_scratch() -> Result<()> {
 }
 
 #[test]
+#[cfg_attr(miri, ignore = "uses the host filesystem")]
 fn package_command_selects_only_the_candidates() -> Result<()> {
     let root = tempfile::tempdir()?;
     let scratch = tempfile::tempdir()?;
@@ -315,6 +345,7 @@ fn package_command_selects_only_the_candidates() -> Result<()> {
 }
 
 #[test]
+#[cfg_attr(miri, ignore = "uses the host filesystem")]
 fn archive_commands_cover_all_three_feature_modes() -> Result<()> {
     let cargo = CargoInvoker {
         root: PathBuf::from("workspace"),

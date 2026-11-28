@@ -39,7 +39,11 @@ fn main() -> ExitCode {
     let Cli {
         command: ArkCommand::ReleaseDependencies { temp_dir },
     } = Cli::parse_from(args);
-    match check_release_dependencies(io::stdin(), temp_dir) {
+    let result = check_release_dependencies(io::stdin(), |candidates| {
+        let cargo = CargoInvoker::discover(std::env::current_dir()?, BTreeMap::new(), temp_dir.as_deref())?;
+        check(candidates, cargo)
+    });
+    match result {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
             eprintln!("cargo ark release-dependencies: {error}");
@@ -48,16 +52,9 @@ fn main() -> ExitCode {
     }
 }
 
-fn check_release_dependencies(input: impl Read, temp_dir: Option<PathBuf>) -> Result<(), Box<dyn std::error::Error>> {
-    check_release_dependencies_with(input, temp_dir, |invocation_dir, temp_dir| {
-        CargoInvoker::discover(invocation_dir, BTreeMap::new(), temp_dir.as_deref())
-    })
-}
-
-fn check_release_dependencies_with(
+fn check_release_dependencies(
     mut input: impl Read,
-    temp_dir: Option<PathBuf>,
-    discover: impl FnOnce(PathBuf, Option<PathBuf>) -> Result<CargoInvoker, Box<dyn std::error::Error>>,
+    validate: impl FnOnce(Candidates) -> Result<(), Box<dyn std::error::Error>>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let mut report = String::new();
     input.read_to_string(&mut report)?;
@@ -67,8 +64,7 @@ fn check_release_dependencies_with(
         return Ok(());
     }
 
-    let cargo = discover(std::env::current_dir()?, temp_dir)?;
-    check(candidates, cargo)
+    validate(candidates)
 }
 
 #[cfg(test)]
@@ -79,27 +75,33 @@ mod tests {
 
     #[test]
     fn accepts_an_empty_report_without_discovering_a_workspace() {
-        check_release_dependencies_with(Cursor::new("[]"), None, |_, _| {
-            panic!("an empty report attempted workspace discovery")
-        })
-        .unwrap();
+        check_release_dependencies(Cursor::new("[]"), |_| panic!("an empty report attempted workspace discovery")).unwrap();
     }
 
     #[test]
     fn rejects_non_utf8_report_input() {
-        let error = check_release_dependencies_with(Cursor::new([0xff]), None, |_, _| {
-            panic!("an invalid report attempted workspace discovery")
-        })
-        .unwrap_err();
+        let error =
+            check_release_dependencies(Cursor::new([0xff]), |_| panic!("an invalid report attempted workspace discovery")).unwrap_err();
         assert_eq!(error.downcast_ref::<io::Error>().unwrap().kind(), io::ErrorKind::InvalidData);
     }
 
     #[test]
     fn rejects_an_invalid_report_without_discovering_a_workspace() {
-        let error = check_release_dependencies_with(Cursor::new(r#"[{"name":"peer"}]"#), None, |_, _| {
+        let error = check_release_dependencies(Cursor::new(r#"[{"name":"peer"}]"#), |_| {
             panic!("an invalid report attempted workspace discovery")
         })
         .unwrap_err();
         assert_eq!(error.to_string(), "candidate is missing its version");
+    }
+
+    #[test]
+    fn passes_a_nonempty_report_to_validation_and_propagates_its_error() {
+        let report = Cursor::new(r#"[{"name":"peer","new_version":"1.0.0"}]"#);
+        let error = check_release_dependencies(report, |candidates| {
+            assert!(!candidates.is_empty());
+            Err("scripted validation failure".into())
+        })
+        .unwrap_err();
+        assert_eq!(error.to_string(), "scripted validation failure");
     }
 }
