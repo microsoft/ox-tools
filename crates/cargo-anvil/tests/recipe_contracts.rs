@@ -435,12 +435,13 @@ fn container_context_and_setup_use_all_generated_recipe_files() {
         assert!(generated.container.contains(&format!("'.anvil/{path}'")));
     }
     assert!(dockerfile.contains("set unstable\\nimport '.anvil/anvil.just'"));
+    assert!(dockerfile.contains("git git-lfs libicu-dev"));
     assert!(dockerfile.contains("ARG ANVIL_ROOT_MSRV"));
     assert!(dockerfile.contains("rustup toolchain install stable --profile minimal"));
     assert!(dockerfile.contains("setup_toolchain=stable"));
     assert!(dockerfile.contains("ANVIL_CARGO_BINSTALL=\"${CARGO_HOME}/bin/cargo-binstall\""));
     assert!(dockerfile.contains("ANVIL_CARGO_INSTALL_TOOLCHAIN=stable"));
-    assert!(dockerfile.contains("RUSTUP_TOOLCHAIN=\"${setup_toolchain}\" just anvil-setup"));
+    assert!(!dockerfile.contains("RUSTUP_TOOLCHAIN=\"${setup_toolchain}\" just anvil-setup"));
 }
 
 #[test]

@@ -3,7 +3,7 @@
 # step fails without build-essential.
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
-        build-essential ca-certificates clang libclang-dev curl git libicu-dev \
+        build-essential ca-certificates clang libclang-dev curl git git-lfs libicu-dev \
         libssl-dev pkg-config tar \
     && rm -rf /var/lib/apt/lists/*
 

@@ -1326,6 +1326,7 @@ fn rendered_managed_region_body(current: Option<&str>, spec: &RegionSpec) -> Str
     let managed_range = find_region(current, spec.id.as_str(), spec.syntax)
         .expect("marker repair above validated the Justfile import region")
         .map(|region| region.start_line.start..region.end_line.end);
+    // #[gamma::skip(literal.int_increment, reason = "managed-region bounds and candidate positions are line starts; shifting every candidate by one byte cannot cross a line-aligned boundary for the multi-byte `set unstable` line", tag = "equivalent")]
     let mut offset = 0;
     for line in current.split_inclusive('\n') {
         let line_start = offset;
@@ -3433,6 +3434,45 @@ mod tests {
                 assert!(!hosts.texts.contains_key(host));
             }
         }
+    }
+
+    #[test]
+    fn unstable_setting_is_added_only_to_the_root_justfile_import_region() {
+        let body = "import '.anvil/anvil.just'\n";
+        for (host, id) in [
+            (artifacts::justfile::JUSTFILE_PATH, "other"),
+            ("Other", artifacts::justfile::JUSTFILE_REGION_ID),
+        ] {
+            let spec = RegionSpec {
+                host: HostSelector::Path(host.to_owned()),
+                id: RegionId::new(id),
+                body: body.to_owned(),
+                syntax: CommentSyntax::Hash,
+            };
+            assert_eq!(rendered_managed_region_body(Some("# repository content\n"), &spec), body);
+        }
+    }
+
+    #[test]
+    fn unstable_setting_outside_the_import_region_is_not_duplicated() {
+        let body = "import '.anvil/anvil.just'\n";
+        let spec = RegionSpec {
+            host: HostSelector::Path(artifacts::justfile::JUSTFILE_PATH.to_owned()),
+            id: RegionId::new(artifacts::justfile::JUSTFILE_REGION_ID),
+            body: body.to_owned(),
+            syntax: CommentSyntax::Hash,
+        };
+        let outside = "# >>> anvil-managed: anvil-imports\n\
+                       import '.anvil/anvil.just'\n\
+                       # <<< anvil-managed: anvil-imports\n\
+                       set unstable\n";
+        assert_eq!(rendered_managed_region_body(Some(outside), &spec), body);
+
+        let inside = "# >>> anvil-managed: anvil-imports\n\
+                      set unstable\n\
+                      import '.anvil/anvil.just'\n\
+                      # <<< anvil-managed: anvil-imports\n";
+        assert_eq!(rendered_managed_region_body(Some(inside), &spec), format!("set unstable\n{body}"));
     }
 
     /// Minimal identity for tests that exercise catalog mechanics rather than

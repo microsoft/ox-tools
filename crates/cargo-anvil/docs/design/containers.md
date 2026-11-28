@@ -141,6 +141,10 @@ Tools and toolchains come from the image, not host Cargo or rustup directories.
 `target/` remains on the repository bind mount; switching between native and
 container builds can trigger recompilation.
 
+The image includes Git LFS so cargo-delta can create baseline worktrees in
+repositories whose checkout hooks require it. Baseline content still skips LFS
+smudging during impact analysis.
+
 Image and volume names use the sanitized repository directory name. Checkouts
 with the same sanitized name share download caches, so `anvil-container-down`
 can affect another checkout.

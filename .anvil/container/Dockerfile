@@ -39,7 +39,7 @@ ENV DEBIAN_FRONTEND=noninteractive \
 # step fails without build-essential.
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
-        build-essential ca-certificates clang libclang-dev curl git libicu-dev \
+        build-essential ca-certificates clang libclang-dev curl git git-lfs libicu-dev \
         libssl-dev pkg-config tar \
     && rm -rf /var/lib/apt/lists/*
 
@@ -122,14 +122,8 @@ RUN : "${ANVIL_ROOT_MSRV:?pass --build-arg ANVIL_ROOT_MSRV=<declared-rust-versio
         && rustup default "${setup_toolchain}"; \
     fi \
     && printf "set unstable\nimport '.anvil/anvil.just'\n" > Justfile \
-    && if [ "${setup_toolchain}" = "none" ]; then \
-        ANVIL_CARGO_BINSTALL="${CARGO_HOME}/bin/cargo-binstall" \
-        ANVIL_CARGO_INSTALL_TOOLCHAIN=stable just anvil-setup binstall; \
-    else \
-        ANVIL_CARGO_BINSTALL="${CARGO_HOME}/bin/cargo-binstall" \
-        ANVIL_CARGO_INSTALL_TOOLCHAIN=stable \
-        RUSTUP_TOOLCHAIN="${setup_toolchain}" just anvil-setup binstall; \
-    fi \
+    && ANVIL_CARGO_BINSTALL="${CARGO_HOME}/bin/cargo-binstall" \
+        ANVIL_CARGO_INSTALL_TOOLCHAIN=stable just anvil-setup binstall \
     && rm -rf "${CARGO_HOME}/registry/cache" "${CARGO_HOME}/registry/src" \
     && rm -f "${CARGO_HOME}/credentials" "${CARGO_HOME}/credentials.toml" "${HOME:-/root}/.netrc" /root/.netrc \
     && mkdir -p "${CARGO_HOME}/registry" "${CARGO_HOME}/git" \
