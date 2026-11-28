@@ -3887,9 +3887,20 @@ mod tests {
             );
             let filtered = filter_reports_with_metadata(parse_reports(&[&raw]).expect("raw LCOV"), &metadata)
                 .expect("local test ranges are removed without losing conservative provenance");
+            let merged = crate::merge_lcov(&[&filtered[0]]).expect("merge one filtered report");
             let repeated = filter_reports_with_metadata(parse_reports(&[&filtered[0]]).expect("published LCOV"), &metadata)
                 .expect("published LCOV may be filtered again");
             assert_eq!(repeated, filtered);
+            let merged_report = parse_lcov(&merged);
+            assert!(
+                merged_report
+                    .sections
+                    .iter()
+                    .any(|(key, section)| { key.source_file == root.join("member/src/macro-backend.rs") && section.is_empty() }),
+                "merged publication must retain the zero-line source-ownership witness"
+            );
+            let merged_coverage = crate::lcov_cov::CoverageReport::from_str(&merged).expect("merged line coverage");
+            assert_eq!(merged_coverage.files.iter().map(|file| file.lines_total).sum::<u32>(), 1);
 
             let report = parse_lcov(&filtered[0]);
             assert_eq!(report.sections.len(), 2);
@@ -3909,13 +3920,12 @@ mod tests {
                 u32::try_from(count).expect("count is zero or one")
             );
 
-            let normal =
-                crate::evaluate_reports_with_metadata(parse_reports(&[&filtered[0]]).expect("published LCOV"), &metadata, &[], None)
-                    .expect("normal evaluation uses the same published counters");
+            let normal = crate::evaluate_reports_with_metadata(parse_reports(&[&merged]).expect("merged LCOV"), &metadata, &[], None)
+                .expect("normal evaluation uses the same published counters");
             assert_eq!(normal.verdict(), expected);
             let workspace = crate::workspace::Workspace::from_metadata(&metadata, None).expect("workspace policy");
             assert_eq!(
-                crate::verdict::evaluate(&coverage, &workspace, &[])
+                crate::verdict::evaluate(&merged_coverage, &workspace, &[])
                     .expect("already filtered evaluation")
                     .verdict(),
                 expected

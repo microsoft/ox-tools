@@ -52,14 +52,26 @@ The optional `run` mode keeps collection and evaluation separated internally:
    machine-readable Cargo messages.
    The instrumented target is unique per configuration beneath a
    per-invocation `target/coverage-gate/` scratch directory and is removed by
-   an RAII guard on every return path. Because every target starts empty, the
-   collector does not run `cargo llvm-cov clean`; it never deletes shared
+   the collector immediately after that configuration's LCOV report is complete.
+   The raw report lives beside the target directories and remains available for
+   filtering and evaluation after cleanup. A later configuration therefore starts
+   without the prior configuration's binaries, dependencies, or raw profiles on
+   disk. The remaining invocation scratch and any targets retained after an
+   earlier operational failure are removed by an RAII guard on every applicable
+   return path. Because every target starts empty, the collector does not run
+   `cargo llvm-cov clean`; it never deletes shared
    cargo-llvm-cov reports, trybuild targets, UI test targets, or ordinary Cargo
    target state. The child also receives `CARGO_TARGET_DIR` pointing at that
    private directory, so metadata-derived trybuild, UI, and report paths do not
    cross configuration or invocation boundaries. Configurations and concurrent
    invocations therefore cannot merge each other's profiles.
-   After evaluation, a pure combiner gives evaluation errors precedence over
+   After collection completes, targets have already been released. A collection
+   or publication error retains the invocation scratch, whose contents can
+   include the target that stopped before cleanup; a nonzero rendered gate
+   verdict retains raw LCOV and stable consumer reports but not completed
+   configuration targets. A passing run or operational evaluation error cleans
+   the remaining scratch.
+   A pure combiner gives evaluation errors precedence over
    cleanup errors, preserves nonzero rendered verdicts with an explicit cleanup
    warning, and converts a passing evaluation plus cleanup failure into an
    operational error. On Windows, explicit cleanup disarms the guard before
@@ -86,8 +98,13 @@ The optional `run` mode keeps collection and evaluation separated internally:
    feature-only gates, and `cfg(not(test))` remain.
 6. The filtered LCOV is staged beside its stable per-configuration path under
    `--coverage-dir` and renamed into place only after complete filtering. The
-   evaluator reads those exact stable files, so callers can give Codecov and
-   Azure DevOps byte-identical released-surface reports.
+   evaluator reads the separate stable configuration files. The same filtered
+   batch is also merged with maximum per-line hit counts and published as
+   `lcov-merged.info`, after the individual reports have all completed. This is
+   the canonical hosted-reporting artifact and has the same line coverage as
+   multi-input evaluation. `--collect-only` publishes only the raw
+   configuration reports and removes any stale merged artifact, so split
+   collection cannot represent one incomplete configuration as canonical.
    `no-default-features` maps to `lcov-no-default.info`.
 
 The Windows response-file retry also writes only to scratch. Successful retry

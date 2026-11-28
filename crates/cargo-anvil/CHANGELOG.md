@@ -2,6 +2,31 @@
 
 ## [Unreleased]
 
+## [0.29.2] - 2026-11-28
+
+- 🐛 Bug Fixes
+
+  - cargo-anvil: isolate runtime shard statuses
+  - cargo-anvil: shard Miri package jobs
+  - cargo-anvil: shard runtime analysis jobs
+  - cargo-anvil: disable Codecov report discovery
+  - cargo-coverage-gate: publish canonical merged LCOV
+  - cargo-anvil: defer local coverage detection until setup
+  - cargo-anvil: use workspace coverage gate during setup
+  - cargo-coverage-gate: release configuration targets
+  - cargo-anvil: repair generated bootstrap environment
+
+- ⚡ Performance
+
+  - cargo-anvil: run lightweight checks workspace-wide ([#406](https://github.com/microsoft/ox-tools/pull/406))
+
+- ✔️ Tasks
+
+  - cargo-anvil: refresh Miri shard release note
+  - cargo-anvil: refresh runtime sharding release note
+  - cargo-anvil: refresh Codecov upload release note
+  - cargo-anvil: release v0.29.2 with coverage gate v0.7.7
+
 ## [0.29.1] - 2026-11-27
 
 - ✨ Features

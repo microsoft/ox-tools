@@ -210,13 +210,15 @@ jobs:
           free-disk-space: true
           impact_mode: consume
       - name: Upload coverage to Codecov
-        # Upload every supported native slice so Codecov can union cfg-gated
-        # coverage. Windows ARM is excluded because its LLVM profiles are
-        # unusable. Require both feature-configuration reports.
-        if: always() && matrix.os != 'windows-arm' && hashFiles('target/coverage/lcov-all-features.info') != '' && hashFiles('target/coverage/lcov-no-default.info') != ''
+        # Upload the collector's canonical max-hit union so Codecov cannot
+        # override one feature configuration with another. Separate
+        # configuration reports remain available to the local gate.
+        # Windows ARM is excluded because its LLVM profiles are unusable.
+        if: always() && matrix.os != 'windows-arm' && hashFiles('target/coverage/lcov-merged.info') != ''
         uses: codecov/codecov-action@303a32d7a59b442fa8d48b6a1cc6825c09c847a5 # v7.1.1
         with:
-          files: target/coverage/lcov-all-features.info,target/coverage/lcov-no-default.info
+          files: target/coverage/lcov-merged.info
+          disable_search: true
           flags: ${{ matrix.os }}
           token: ${{ secrets.CODECOV_TOKEN }}
           fail_ci_if_error: false
@@ -264,12 +266,14 @@ jobs:
         run: Get-PSDrive -PSProvider FileSystem | Format-Table -AutoSize
 
   pr-runtime-analysis:
-    name: "Check Group: Runtime Analysis (${{ matrix.os }})"
+    name: "Check Group: Runtime Analysis (${{ matrix.os }}, ${{ matrix.check }}, shard ${{ matrix.shard }})"
     permissions:
       contents: read
       statuses: write
-    # Stricter-runtime correctness: miri + careful + loom.
-    # 4-leg matrix -- these checks compile per host target and can
+    # Stricter-runtime correctness: miri, careful, and loom.
+    # Each check gets an independent 4-OS matrix leg so no GitHub job
+    # combines their multi-hour runtime. The family remains one aggregate
+    # matrix dependency for the required-check fan-in. All checks compile per host target and can
     # surface OS/arch-specific bugs. All are impact-scoped so the
     # wall-clock is proportional to the PR's blast radius.
     needs: [impact-linux, impact-windows]
@@ -277,6 +281,13 @@ jobs:
       fail-fast: false
       matrix:
         os: [linux, windows, linux-arm, windows-arm]
+        check: [miri, careful, loom]
+        shard: [0, 1]
+        exclude:
+          - check: careful
+            shard: 1
+          - check: loom
+            shard: 1
     runs-on: ${{ matrix.os == 'linux' && inputs.linux_runner
       || matrix.os == 'windows' && inputs.windows_runner
       || matrix.os == 'linux-arm' && inputs.linux_arm_runner
@@ -294,9 +305,12 @@ jobs:
           path: target/anvil/impact
       - uses: ./.anvil/github/actions/run-group
         with:
-          group: pr-runtime-analysis
+          group: pr-runtime-analysis-${{ matrix.check }}
+          status_identity: pr-runtime-analysis-${{ matrix.check }}-${{ matrix.shard }}
           publish_commit_statuses: ${{ inputs.publish_commit_statuses }}
           impact_mode: consume
+        env:
+          ANVIL_MIRI_PACKAGE_SHARD: ${{ matrix.shard }}
 
       - name: Report disk usage
         if: always()

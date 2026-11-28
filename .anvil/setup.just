@@ -316,7 +316,7 @@ cargo_audit_version := "0.22.2"
 cargo_bolero_version := "0.13.5"
 cargo_careful_version := "0.4.10"
 cargo_check_external_types_version := "0.5.0"
-cargo_coverage_gate_version := "0.7.5"
+cargo_coverage_gate_version := "0.7.7"
 cargo_delta_version := "0.5.0"
 cargo_deny_version := "0.20.2"
 cargo_doc2readme_version := "0.7.3"
@@ -584,12 +584,24 @@ anvil-license-headers-validate-prereqs: anvil-tool-cargo-heather-validate-prereq
 # Install prerequisites for the `anvil-llvm-cov` recipe.
 [group("anvil-setup")]
 [private]
-anvil-llvm-cov-setup installer="install": anvil-component-nightly-llvm-tools-install (anvil-tool-cargo-llvm-cov-install installer) (anvil-tool-cargo-nextest-install installer) (anvil-tool-cargo-coverage-gate-install installer) (anvil-tool-cargo-each-install installer)
+anvil-llvm-cov-setup installer="install": anvil-component-nightly-llvm-tools-install (anvil-tool-cargo-llvm-cov-install installer) (anvil-tool-cargo-nextest-install installer) (anvil-tool-cargo-each-install installer)
+    {{ just_executable() }} --justfile {{ quote(justfile()) }} _anvil-llvm-cov-setup-coverage-gate {{ installer }}
+
+# Resolve the workspace-owned tool after the cargo-each prerequisite exists.
+[private]
+_anvil-llvm-cov-setup-coverage-gate installer:
+    {{ if anvil_coverage_gate_local_command == "" { just_executable() + " --justfile " + quote(justfile()) + " anvil-tool-cargo-coverage-gate-install " + installer } else { "# the workspace supplies the cargo-coverage-gate command" } }}
 
 # Validate prerequisites for the `anvil-llvm-cov` recipe.
 [group("anvil-setup")]
 [private]
-anvil-llvm-cov-validate-prereqs: anvil-component-nightly-llvm-tools-validate-prereqs anvil-tool-cargo-llvm-cov-validate-prereqs anvil-tool-cargo-nextest-validate-prereqs anvil-tool-cargo-coverage-gate-validate-prereqs anvil-tool-cargo-each-validate-prereqs
+anvil-llvm-cov-validate-prereqs: anvil-component-nightly-llvm-tools-validate-prereqs anvil-tool-cargo-llvm-cov-validate-prereqs anvil-tool-cargo-nextest-validate-prereqs anvil-tool-cargo-each-validate-prereqs
+    {{ just_executable() }} --justfile {{ quote(justfile()) }} _anvil-llvm-cov-validate-coverage-gate
+
+# Resolve the workspace-owned tool only after cargo-each is known to be present.
+[private]
+_anvil-llvm-cov-validate-coverage-gate:
+    {{ if anvil_coverage_gate_local_command == "" { just_executable() + " --justfile " + quote(justfile()) + " anvil-tool-cargo-coverage-gate-validate-prereqs" } else { "# the workspace supplies the cargo-coverage-gate command" } }}
 
 # Install prerequisites for the `anvil-loom` recipe.
 [group("anvil-setup")]
@@ -836,6 +848,36 @@ anvil-pr-runtime-analysis-validate-prereqs: \
     anvil-careful-validate-prereqs \
     anvil-loom-validate-prereqs
 
+[private]
+anvil-pr-runtime-analysis-miri-setup installer="install": \
+    (anvil-tool-cargo-delta-install installer) \
+    (anvil-miri-setup installer)
+
+[private]
+anvil-pr-runtime-analysis-miri-validate-prereqs: \
+    anvil-tool-cargo-delta-validate-prereqs \
+    anvil-miri-validate-prereqs
+
+[private]
+anvil-pr-runtime-analysis-careful-setup installer="install": \
+    (anvil-tool-cargo-delta-install installer) \
+    (anvil-careful-setup installer)
+
+[private]
+anvil-pr-runtime-analysis-careful-validate-prereqs: \
+    anvil-tool-cargo-delta-validate-prereqs \
+    anvil-careful-validate-prereqs
+
+[private]
+anvil-pr-runtime-analysis-loom-setup installer="install": \
+    (anvil-tool-cargo-delta-install installer) \
+    (anvil-loom-setup installer)
+
+[private]
+anvil-pr-runtime-analysis-loom-validate-prereqs: \
+    anvil-tool-cargo-delta-validate-prereqs \
+    anvil-loom-validate-prereqs
+
 # Install prerequisites for the `anvil-pr-fuzzing` recipe.
 [private]
 anvil-pr-fuzzing-setup installer="install":
@@ -907,6 +949,30 @@ anvil-scheduled-runtime-analysis-validate-prereqs: \
     anvil-miri-tree-borrows-validate-prereqs \
     anvil-miri-strict-provenance-validate-prereqs \
     anvil-miri-race-coverage-validate-prereqs
+
+[private]
+anvil-scheduled-runtime-analysis-miri-setup installer="install": (anvil-miri-setup installer)
+
+[private]
+anvil-scheduled-runtime-analysis-miri-validate-prereqs: anvil-miri-validate-prereqs
+
+[private]
+anvil-scheduled-runtime-analysis-miri-tree-borrows-setup installer="install": (anvil-miri-tree-borrows-setup installer)
+
+[private]
+anvil-scheduled-runtime-analysis-miri-tree-borrows-validate-prereqs: anvil-miri-tree-borrows-validate-prereqs
+
+[private]
+anvil-scheduled-runtime-analysis-miri-strict-provenance-setup installer="install": (anvil-miri-strict-provenance-setup installer)
+
+[private]
+anvil-scheduled-runtime-analysis-miri-strict-provenance-validate-prereqs: anvil-miri-strict-provenance-validate-prereqs
+
+[private]
+anvil-scheduled-runtime-analysis-miri-race-coverage-setup installer="install": (anvil-miri-race-coverage-setup installer)
+
+[private]
+anvil-scheduled-runtime-analysis-miri-race-coverage-validate-prereqs: anvil-miri-race-coverage-validate-prereqs
 
 # Install prerequisites for the `anvil-scheduled-exhaustive` recipe.
 [private]

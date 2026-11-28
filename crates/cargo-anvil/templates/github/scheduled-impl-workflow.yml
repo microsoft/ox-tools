@@ -66,11 +66,12 @@ jobs:
           group: scheduled-test
           free-disk-space: true
       - name: Upload coverage to Codecov
-        # Upload both gated feature reports from every supported native slice.
-        if: always() && matrix.os != 'windows-arm' && hashFiles('target/coverage/lcov-all-features.info') != '' && hashFiles('target/coverage/lcov-no-default.info') != ''
+        # Upload the canonical max-hit union from every supported native slice.
+        if: always() && matrix.os != 'windows-arm' && hashFiles('target/coverage/lcov-merged.info') != ''
         uses: codecov/codecov-action@303a32d7a59b442fa8d48b6a1cc6825c09c847a5 # v7.1.1
         with:
-          files: target/coverage/lcov-all-features.info,target/coverage/lcov-no-default.info
+          files: target/coverage/lcov-merged.info
+          disable_search: true
           flags: scheduled,${{ matrix.os }}
           token: ${{ secrets.CODECOV_TOKEN }}
           fail_ci_if_error: false
@@ -106,12 +107,19 @@ jobs:
         run: Get-PSDrive -PSProvider FileSystem | Format-Table -AutoSize
 
   scheduled-runtime-analysis:
-    # Each OS leg runs all Miri profiles sequentially so they share setup and
-    # artifacts; OS legs run in parallel.
+    name: "Scheduled Runtime Analysis (${{ matrix.os }}, ${{ matrix.profile }}, shard ${{ matrix.shard }})"
+    # Each Miri profile gets an independent OS matrix leg. The scheduled
+    # runtime family remains one aggregate matrix dependency for failure fan-in.
     strategy:
       fail-fast: false
       matrix:
         os: [linux, windows, linux-arm, windows-arm]
+        profile:
+          - miri
+          - miri-tree-borrows
+          - miri-strict-provenance
+          - miri-race-coverage
+        shard: [0, 1]
     runs-on: ${{ matrix.os == 'linux' && inputs.linux_runner
       || matrix.os == 'windows' && inputs.windows_runner
       || matrix.os == 'linux-arm' && inputs.linux_arm_runner
@@ -122,7 +130,10 @@ jobs:
           lfs: true
       - uses: ./.anvil/github/actions/run-group
         with:
-          group: scheduled-runtime-analysis
+          group: scheduled-runtime-analysis-${{ matrix.profile }}
+          status_identity: scheduled-runtime-analysis-${{ matrix.profile }}-${{ matrix.shard }}
+        env:
+          ANVIL_MIRI_PACKAGE_SHARD: ${{ matrix.shard }}
 
       - name: Report disk usage
         if: always()

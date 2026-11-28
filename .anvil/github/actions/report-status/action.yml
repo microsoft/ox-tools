@@ -8,6 +8,10 @@ inputs:
   group:
     description: Anvil group recipe name without the anvil- prefix.
     required: true
+  status_identity:
+    description: Identity used to reconcile this job's supplemental statuses.
+    required: false
+    default: ""
   setup_outcome:
     description: Outcome of the Anvil setup step.
     required: true
@@ -26,6 +30,7 @@ runs:
       uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
       env:
         ANVIL_GROUP: ${{ inputs.group }}
+        ANVIL_STATUS_IDENTITY: ${{ inputs.status_identity }}
         ANVIL_SETUP_OUTCOME: ${{ inputs.setup_outcome }}
         ANVIL_EXIT_CODE: ${{ inputs.exit_code }}
         ANVIL_FAILED_RECIPE: ${{ inputs.failed_recipe }}
@@ -33,6 +38,7 @@ runs:
         github-token: ${{ github.token }}
         script: |
           const group = process.env.ANVIL_GROUP;
+          const statusIdentity = process.env.ANVIL_STATUS_IDENTITY || group;
           const setupOutcome = process.env.ANVIL_SETUP_OUTCOME;
           const exitCode = process.env.ANVIL_EXIT_CODE;
           const failedRecipe = process.env.ANVIL_FAILED_RECIPE || `anvil-${group}`;
@@ -44,7 +50,7 @@ runs:
             );
           }
           const headSha = context.payload.pull_request.head.sha;
-          const groupMarker = `#anvil-group=${encodeURIComponent(group)}`;
+          const groupMarker = `#anvil-group=${encodeURIComponent(statusIdentity)}`;
           const targetUrl =
             `${process.env.GITHUB_SERVER_URL}/${process.env.GITHUB_REPOSITORY}` +
             `/actions/runs/${process.env.GITHUB_RUN_ID}${groupMarker}`;
@@ -56,9 +62,9 @@ runs:
           const MAX_STATUS_PAGE_SIZE = 100;
           const MIN_FAILURE_LABEL_LENGTH = 1;
           const statusPrefix = "Anvil / ";
-          // Include the group in the persistent identity so two groups that
-          // reach the same recipe on one runner cannot overwrite each other.
-          const statusSuffix = ` [${group}] (${runner})`;
+          // A shard-specific status identity keeps parallel jobs from clearing
+          // each other's failures while their execution group stays unchanged.
+          const statusSuffix = ` [${statusIdentity}] (${runner})`;
 
           let state;
           let description;

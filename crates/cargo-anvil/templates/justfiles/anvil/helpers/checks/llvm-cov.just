@@ -5,13 +5,20 @@
 # Regenerate with cargo-anvil to update this file.
 
 anvil_coverage_gate_host_target := shell("rustc +" + rust_nightly + " --print host-tuple")
-anvil_coverage_gate_local_command := shell(
-    "cargo each --workspace --filter metadata:anvil.catalog-tool=cargo-coverage-gate --once --dry-run -- cargo +"
-    + rust_nightly
-    + " run --locked --package cargo-coverage-gate --bin cargo-coverage-gate --target="
-    + anvil_coverage_gate_host_target
-    + " -- coverage-gate"
-)
+# The sentinel distinguishes automatic workspace detection from the explicit
+# empty override used when a container build has no copied Cargo manifests.
+anvil_coverage_gate_local_command_override := env_var_or_default("ANVIL_COVERAGE_GATE_LOCAL_COMMAND", "__anvil-auto-detect__")
+anvil_coverage_gate_local_command := if anvil_coverage_gate_local_command_override == "__anvil-auto-detect__" {
+    shell(
+        "cargo each --workspace --filter metadata:anvil.catalog-tool=cargo-coverage-gate --once --dry-run -- cargo +"
+        + rust_nightly
+        + " run --locked --package cargo-coverage-gate --bin cargo-coverage-gate --target="
+        + anvil_coverage_gate_host_target
+        + " -- coverage-gate"
+    )
+} else {
+    anvil_coverage_gate_local_command_override
+}
 anvil_coverage_gate_command := if anvil_coverage_gate_local_command == "" {
     "cargo +" + rust_nightly + " coverage-gate"
 } else {

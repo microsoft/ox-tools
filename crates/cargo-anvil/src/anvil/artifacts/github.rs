@@ -342,6 +342,7 @@ const baseContext = {
 };
 const baseEnv = {
   ANVIL_GROUP: "pr-fast",
+  ANVIL_STATUS_IDENTITY: "",
   ANVIL_SETUP_OUTCOME: "success",
   ANVIL_EXIT_CODE: "17",
   ANVIL_FAILED_RECIPE: "anvil-license-headers",
@@ -450,6 +451,38 @@ async function scenario({ env = {}, history = [], context = baseContext } = {}) 
   assert.equal(clean.calls.publish[0].context, staleContext);
   assert.equal(clean.calls.publish[0].state, "success");
   assert.equal(clean.calls.publish[0].description, "superseded: all pr-fast recipes passed");
+
+  const shardZeroMarker = "#anvil-group=pr-runtime-analysis-miri-0";
+  const shardOneMarker = "#anvil-group=pr-runtime-analysis-miri-1";
+  const shardZeroContext =
+    "Anvil / miri test [pr-runtime-analysis-miri-0] (linux-x64)";
+  const shardOneContext =
+    "Anvil / miri test [pr-runtime-analysis-miri-1] (linux-x64)";
+  const cleanShard = await scenario({
+    env: {
+      ANVIL_GROUP: "pr-runtime-analysis-miri",
+      ANVIL_STATUS_IDENTITY: "pr-runtime-analysis-miri-0",
+      ANVIL_EXIT_CODE: "0",
+      ANVIL_FAILED_RECIPE: "",
+    },
+    history: [
+      {
+        context: shardZeroContext,
+        state: "failure",
+        target_url:
+          `https://github.com/microsoft/ox-tools/actions/runs/41${shardZeroMarker}`,
+      },
+      {
+        context: shardOneContext,
+        state: "failure",
+        target_url:
+          `https://github.com/microsoft/ox-tools/actions/runs/41${shardOneMarker}`,
+      },
+    ],
+  });
+  assert.equal(cleanShard.calls.publish.length, 1);
+  assert.equal(cleanShard.calls.publish[0].context, shardZeroContext);
+  assert.equal(cleanShard.calls.publish[0].state, "success");
 
   const setup = await scenario({
     env: { ANVIL_SETUP_OUTCOME: "failure", ANVIL_EXIT_CODE: "", ANVIL_FAILED_RECIPE: "" },

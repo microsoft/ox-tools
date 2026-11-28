@@ -30,6 +30,7 @@
 //! [lcov]: https://github.com/linux-test-project/lcov
 
 use std::collections::BTreeMap;
+use std::fmt::Write as _;
 #[cfg(test)]
 use std::path::Path;
 use std::path::PathBuf;
@@ -62,7 +63,7 @@ pub(crate) struct FileReport {
 
 #[derive(Debug)]
 struct MergedLineCoverage {
-    covered: bool,
+    count: u64,
     checksum: Option<String>,
 }
 
@@ -133,7 +134,7 @@ impl CoverageReport {
             for (line, data) in lines {
                 total = total.saturating_add(1);
                 coverable_lines.push(line);
-                if data.covered {
+                if data.count > 0 {
                     covered = covered.saturating_add(1);
                 } else {
                     uncovered_lines.push(line);
@@ -156,11 +157,10 @@ fn merge_line_coverage(merged: &mut LineCoverage, report: lcov::Report) -> Resul
         let source_file = section_key.source_file;
         let lines = merged.entry(source_file.clone()).or_default();
         for (line_key, data) in section.lines {
-            let is_covered = data.count > 0;
             match lines.entry(line_key.line) {
                 std::collections::btree_map::Entry::Vacant(entry) => {
                     let _ = entry.insert(MergedLineCoverage {
-                        covered: is_covered,
+                        count: data.count,
                         checksum: data.checksum,
                     });
                 }
@@ -181,12 +181,44 @@ fn merge_line_coverage(merged: &mut LineCoverage, report: lcov::Report) -> Resul
                     if data.checksum.is_some() {
                         existing.checksum = data.checksum;
                     }
-                    existing.covered |= is_covered;
+                    existing.count = existing.count.max(data.count);
                 }
             }
         }
     }
     Ok(())
+}
+
+/// Merge parsed LCOV reports into one canonical line-level report.
+pub(crate) fn merge_lcov_reports(reports: Vec<lcov::Report>) -> Result<String, CoverageGateError> {
+    let mut merged = LineCoverage::new();
+    for report in reports {
+        merge_line_coverage(&mut merged, report)?;
+    }
+
+    let mut output = String::new();
+    for (source_file, lines) in merged {
+        let records = std::iter::once(lcov::Record::TestName { name: String::new() })
+            .chain(std::iter::once(lcov::Record::SourceFile { path: source_file.clone() }))
+            .chain(lines.iter().map(|(line, data)| lcov::Record::LineData {
+                line: *line,
+                count: data.count,
+                checksum: data.checksum.clone(),
+            }))
+            .chain([
+                lcov::Record::LinesFound {
+                    found: u32::try_from(lines.len()).expect("LCOV line count cannot exceed u32"),
+                },
+                lcov::Record::LinesHit {
+                    hit: u32::try_from(lines.values().filter(|data| data.count > 0).count()).expect("LCOV hit count cannot exceed u32"),
+                },
+                lcov::Record::EndOfRecord,
+            ]);
+        for record in records {
+            writeln!(&mut output, "{record}").expect("writing LCOV records to a String cannot fail");
+        }
+    }
+    Ok(output)
 }
 
 #[cfg(test)]
@@ -206,12 +238,52 @@ mod tests {
         }
         let source = &merged[Path::new("source.rs")];
         assert_eq!(source[&1].checksum.as_deref(), Some("retained"));
-        assert!(source[&1].covered);
+        assert!(source[&1].count > 0);
     }
     const SINGLE_FILE: &str = include_str!("../tests/fixtures/lcov/single_file.info");
     const MULTI_FILE: &str = include_str!("../tests/fixtures/lcov/multi_file.info");
     const EMPTY: &str = include_str!("../tests/fixtures/lcov/empty.info");
     const MALFORMED: &str = include_str!("../tests/fixtures/lcov/malformed.info");
+
+    #[test]
+    fn merged_lcov_uses_max_hits_and_matches_multi_input_evaluation() {
+        let all_features = "TN:\nSF:fixture.rs\nDA:1,2,all\nDA:2,0,no-default\nDA:3,1,exactly-once\nDA:4,0\nend_of_record\n";
+        let no_default = "TN:\nSF:fixture.rs\nDA:1,1,all\nDA:2,4,no-default\nDA:3,0\nDA:4,0\nend_of_record\n";
+
+        let merged = crate::merge_lcov(&[all_features, no_default]).expect("merge compatible reports");
+        assert!(merged.contains("DA:1,2,all\n"), "{merged}");
+        assert!(merged.contains("DA:2,4,no-default\n"), "{merged}");
+        assert!(merged.contains("DA:3,1,exactly-once\n"), "{merged}");
+        assert!(merged.contains("DA:4,0\n"), "{merged}");
+        assert!(merged.contains("LF:4\nLH:3\n"), "{merged}");
+        assert!(!merged.contains("DA:1,3"), "{merged}");
+        let merged_report = CoverageReport::from_str(&merged).expect("parse merged report");
+        let separate_report = CoverageReport::from_strs(&[all_features, no_default]).expect("evaluate separate reports");
+        assert_eq!(merged_report.files.len(), separate_report.files.len());
+        for (merged_file, separate_file) in merged_report.files.iter().zip(&separate_report.files) {
+            assert_eq!(merged_file.filename, separate_file.filename);
+            assert_eq!(merged_file.lines_total, separate_file.lines_total);
+            assert_eq!(merged_file.lines_covered, separate_file.lines_covered);
+            assert_eq!(merged_file.coverable_lines, separate_file.coverable_lines);
+            assert_eq!(merged_file.uncovered_lines, separate_file.uncovered_lines);
+        }
+    }
+
+    #[test]
+    fn merged_lcov_reports_parse_and_checksum_failures() {
+        let malformed = crate::merge_lcov(&["not LCOV"]).expect_err("malformed input must fail");
+        assert!(malformed.to_string().contains("lcov tracefile is not well-formed"), "{malformed}");
+
+        let conflicting = crate::merge_lcov(&[
+            "TN:\nSF:fixture.rs\nDA:1,1,left\nend_of_record\n",
+            "TN:\nSF:fixture.rs\nDA:1,1,right\nend_of_record\n",
+        ])
+        .expect_err("conflicting source checksums must fail");
+        assert!(
+            conflicting.to_string().contains("conflicting checksums for line 1"),
+            "{conflicting}"
+        );
+    }
 
     fn merged_checksum_error(error: &CoverageGateError) -> &MergedSourceChecksumError {
         std::iter::successors(Some(error as &(dyn std::error::Error + 'static)), |source| source.source())

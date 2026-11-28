@@ -10,3 +10,19 @@ _anvil-scheduled-runtime-analysis: anvil-scheduled-runtime-analysis-validate-pre
     anvil-miri-tree-borrows \
     anvil-miri-strict-provenance \
     anvil-miri-race-coverage
+
+[private]
+_anvil-scheduled-runtime-analysis-miri: anvil-scheduled-runtime-analysis-miri-validate-prereqs \
+    anvil-miri
+
+[private]
+_anvil-scheduled-runtime-analysis-miri-tree-borrows: anvil-scheduled-runtime-analysis-miri-tree-borrows-validate-prereqs \
+    anvil-miri-tree-borrows
+
+[private]
+_anvil-scheduled-runtime-analysis-miri-strict-provenance: anvil-scheduled-runtime-analysis-miri-strict-provenance-validate-prereqs \
+    anvil-miri-strict-provenance
+
+[private]
+_anvil-scheduled-runtime-analysis-miri-race-coverage: anvil-scheduled-runtime-analysis-miri-race-coverage-validate-prereqs \
+    anvil-miri-race-coverage

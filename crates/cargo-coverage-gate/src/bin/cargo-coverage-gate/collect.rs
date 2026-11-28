@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitCode, Output, Stdio};
 use std::{env, fs, io};
 
-use cargo_coverage_gate::{CoverageGateError, filter_lcov_many};
+use cargo_coverage_gate::{CoverageGateError, filter_lcov_many, merge_lcov};
 use cargo_metadata::{Metadata, MetadataCommand};
 use ohno::{AppError, EnrichableExt as _, IntoAppError};
 use semver::Version;
@@ -41,6 +41,8 @@ pub(crate) fn run(args: &CoverageGateArgs, collection: &CollectionArgs) -> Resul
 
     let tools = ToolPrograms::from_env();
     let (workspace, selection, collection) = prepare_collection(args, collection, &tools, WorkspaceInfo::load, resolved_collection)?;
+    // #[gamma::skip(try.propagate_to_unwrap, reason = "The injected helper is tested with native removal failures; constructing a permission-denied path portably at this run-level call would require global filesystem manipulation.", tag = "native-boundary")]
+    withhold_merged_report_with(&merged_lcov_path(&collection.coverage_dir), |path| fs::remove_file(path))?;
     let configurations = normalized_configurations(&collection.configurations);
     let effective_target = EffectiveTarget::resolve(&workspace, args.target.as_deref(), &tools)?;
 
@@ -96,10 +98,7 @@ pub(crate) fn run(args: &CoverageGateArgs, collection: &CollectionArgs) -> Resul
         quiet: args.quiet,
     };
     let evaluation = (|| {
-        let mut collected = Vec::with_capacity(configurations.len());
-        for configuration in configurations {
-            collected.push(collect_configuration(&execution, configuration)?);
-        }
+        let collected = collect_configurations(&execution, &configurations)?;
         filter_then_evaluate(&execution, &collected, |lcov_paths| {
             crate::run::evaluate_filtered_paths(args, lcov_paths, &selection.gated_names(), Some(&effective_target.triple), |path| {
                 fs::read_to_string(path)
@@ -120,7 +119,7 @@ fn complete_collection(
     };
     scratch.armed = false;
     eprintln!(
-        "coverage-gate: retained failed coverage run at `{}`; inspect its raw profiles and reports, then remove this directory",
+        "coverage-gate: retained failed coverage diagnostics at `{}`; inspect retained LCOV and any configuration targets left after a collection failure, then remove this directory",
         diagnostic_path(scratch.path())
     );
     result
@@ -697,6 +696,46 @@ struct CollectedReport {
     configuration: FeatureConfiguration,
 }
 
+/// Collect every configuration while releasing completed build intermediates.
+fn collect_configurations(
+    execution: &CollectionExecution<'_>,
+    configurations: &[FeatureConfiguration],
+) -> Result<Vec<CollectedReport>, AppError> {
+    collect_configurations_with(
+        configurations,
+        |configuration| collect_configuration(execution, configuration),
+        |configuration| cleanup_configuration_target_with(execution, configuration, remove_dir_if_present),
+    )
+}
+
+/// Coordinates configuration collection and cleanup so later builds never
+/// overlap the previous configuration's large target directory.
+fn collect_configurations_with(
+    configurations: &[FeatureConfiguration],
+    mut collect: impl FnMut(FeatureConfiguration) -> Result<CollectedReport, AppError>,
+    mut cleanup: impl FnMut(FeatureConfiguration) -> Result<(), AppError>,
+) -> Result<Vec<CollectedReport>, AppError> {
+    let mut collected = Vec::with_capacity(configurations.len());
+    for &configuration in configurations {
+        let report = collect(configuration)?;
+        cleanup(configuration)?;
+        collected.push(report);
+    }
+    Ok(collected)
+}
+
+/// Adapts a native removal result to the configuration-cleanup error contract.
+fn cleanup_configuration_target_with(
+    execution: &CollectionExecution<'_>,
+    configuration: FeatureConfiguration,
+    remove: impl FnOnce(&Path) -> io::Result<()>,
+) -> Result<(), AppError> {
+    let target_dir = configuration_target_dir(execution, configuration);
+    let result = remove(&target_dir);
+    let context = cleanup_error_context(&target_dir, result.as_ref().err());
+    result.into_app_err(context)
+}
+
 fn collect_configuration(execution: &CollectionExecution<'_>, configuration: FeatureConfiguration) -> Result<CollectedReport, AppError> {
     let stable_path = execution
         .args
@@ -745,8 +784,18 @@ fn read_raw_lcov(path: &Path) -> Result<String, AppError> {
 fn filter_and_publish_reports_with_reader(
     execution: &CollectionExecution<'_>,
     collected: &[CollectedReport],
+    read: impl FnMut(&Path) -> Result<String, AppError>,
+    filter: impl FnMut(&[&str], &Path) -> Result<Vec<String>, AppError>,
+) -> Result<Vec<PathBuf>, AppError> {
+    filter_and_publish_reports_with_reader_and_remove(execution, collected, read, filter, |path| fs::remove_file(path))
+}
+
+fn filter_and_publish_reports_with_reader_and_remove(
+    execution: &CollectionExecution<'_>,
+    collected: &[CollectedReport],
     mut read: impl FnMut(&Path) -> Result<String, AppError>,
     mut filter: impl FnMut(&[&str], &Path) -> Result<Vec<String>, AppError>,
+    remove_merged: impl FnOnce(&Path) -> io::Result<()>,
 ) -> Result<Vec<PathBuf>, AppError> {
     // Finish reading, validating, filtering, and staging the complete batch
     // before publishing. Each final rename is still an independent atomic
@@ -770,17 +819,55 @@ fn filter_and_publish_reports_with_reader(
         let manifest = execution.workspace.root.join("Cargo.toml");
         filter(&raw_refs, &manifest)?
     };
-    publish_reports(collected.iter().enumerate().map(|(index, report)| {
-        let contents = published
-            .get(index)
-            .expect("raw publication and filter_lcov_many preserve one output for every input tracefile");
-        (
-            report.stable_path.as_path(),
-            format!("{}-published.info", report.configuration.artifact_name()),
-            contents.as_str(),
-        )
-    }))?;
+    let merged_path = merged_lcov_path(&execution.args.coverage_dir);
+    let mut reports = collected
+        .iter()
+        .enumerate()
+        .map(|(index, report)| {
+            let contents = published
+                .get(index)
+                .expect("raw publication and filter_lcov_many preserve one output for every input tracefile");
+            (
+                report.stable_path.clone(),
+                format!("{}-published.info", report.configuration.artifact_name()),
+                contents.clone(),
+            )
+        })
+        .collect::<Vec<_>>();
+    if execution.args.collect_only {
+        withhold_merged_report_with(&merged_path, remove_merged)?;
+    } else {
+        let merged = merge_lcov(&published.iter().map(String::as_str).collect::<Vec<_>>())
+            .into_app_err("failed to merge filtered LCOV reports for publication")?;
+        // #[gamma::skip(literal.str_to_empty, literal.str_to_xyzzy, reason = "The temporary staging label is internal and has no observable contract after publication.", tag = "equivalent")]
+        reports.push((merged_path, "merged-published.info".to_owned(), merged));
+    }
+    publish_reports(
+        reports
+            .iter()
+            .map(|(path, label, contents)| (path.as_path(), label.clone(), contents.as_str())),
+    )?;
     Ok(collected.iter().map(|report| report.stable_path.clone()).collect())
+}
+
+fn merged_lcov_path(coverage_dir: &Path) -> PathBuf {
+    coverage_dir.join("lcov-merged.info")
+}
+
+/// Removes a prior canonical report before work that cannot recreate it.
+fn withhold_merged_report_with(path: &Path, remove: impl FnOnce(&Path) -> io::Result<()>) -> Result<(), AppError> {
+    remove_file_if_present_with(path, remove).into_app_err(format!(
+        "failed to withhold merged LCOV report `{}` during collection",
+        diagnostic_path(path)
+    ))
+}
+
+fn remove_file_if_present_with(path: &Path, remove: impl FnOnce(&Path) -> io::Result<()>) -> io::Result<()> {
+    match remove(path) {
+        Ok(()) => Ok(()),
+        Err(error) if matches!(error.kind(), io::ErrorKind::NotFound | io::ErrorKind::NotADirectory) => Ok(()),
+        Err(error) => Err(error),
+    }
 }
 
 fn cargo_command(workspace: &WorkspaceInfo, tools: &ToolPrograms) -> Command {
@@ -1438,7 +1525,8 @@ fn remove_windows_dir_if_present_with(
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
-    use std::cell::Cell;
+    use std::cell::{Cell, RefCell};
+    use std::collections::BTreeMap;
     use std::num::NonZeroUsize;
     #[cfg(unix)]
     use std::os::unix::process::ExitStatusExt as _;
@@ -1453,6 +1541,258 @@ mod tests {
 
     const RAW_ALL_FEATURES: &str = "TN:all-features\nSF:fixture.rs\nDA:1,1\nend_of_record\n";
     const RAW_NO_DEFAULT: &str = "TN:no-default\nSF:fixture.rs\nDA:1,1\nend_of_record\n";
+
+    /// Verifies that per-configuration target removal leaves every raw report
+    /// available for final publication and evaluation.
+    fn assert_reports_survive_target_cleanup(
+        execution: &CollectionExecution<'_>,
+        collected: &[CollectedReport],
+        raw_reports: &RefCell<BTreeMap<PathBuf, String>>,
+        stable_reports: &RefCell<BTreeMap<PathBuf, String>>,
+    ) {
+        let evaluated = Cell::new(false);
+        filter_then_evaluate_with(
+            execution,
+            collected,
+            |_, collected| {
+                let paths = collected
+                    .iter()
+                    .map(|report| {
+                        let contents = raw_reports
+                            .borrow()
+                            .get(&report.raw_path)
+                            .expect("raw report must survive target cleanup")
+                            .clone();
+                        stable_reports.borrow_mut().insert(report.stable_path.clone(), contents);
+                        report.stable_path.clone()
+                    })
+                    .collect();
+                Ok(paths)
+            },
+            |paths| {
+                assert_eq!(
+                    paths
+                        .iter()
+                        .map(|path| {
+                            stable_reports
+                                .borrow()
+                                .get(path)
+                                .expect("published report must reach evaluation")
+                                .clone()
+                        })
+                        .collect::<Vec<_>>(),
+                    [RAW_ALL_FEATURES, RAW_NO_DEFAULT]
+                );
+                evaluated.set(true);
+                Ok(ExitCode::SUCCESS)
+            },
+        )
+        .expect("report publication completes")
+        .expect("retained reports reach evaluation");
+        assert!(evaluated.get(), "evaluation must consume both retained reports");
+    }
+
+    #[test]
+    fn completed_configuration_targets_are_removed_before_the_next_collection_and_reports_survive() {
+        let scratch_dir = PathBuf::from("synthetic-scratch");
+        let target_root = scratch_dir.join("cargo-target");
+        let coverage_dir = PathBuf::from("synthetic-coverage");
+        let workspace = workspace(Path::new("synthetic-workspace"));
+        let selection = Selection {
+            explicit: false,
+            members: workspace.members.clone(),
+        };
+        let args = CollectionArgs {
+            coverage_dir: coverage_dir.clone(),
+            ..collection_args()
+        };
+        let tools = ToolPrograms {
+            cargo: OsString::from("never-invoked"),
+            rustc: OsString::from("never-invoked"),
+        };
+        let execution = CollectionExecution {
+            workspace: &workspace,
+            selection: &selection,
+            args: &args,
+            scratch_dir: &scratch_dir,
+            coverage_target_root: &target_root,
+            target: None,
+            tools: &tools,
+            quiet: false,
+        };
+        let configurations = [FeatureConfiguration::AllFeatures, FeatureConfiguration::NoDefaultFeatures];
+
+        let completed_configs = RefCell::new(Vec::new());
+        let targets = RefCell::new(BTreeSet::new());
+        let raw_reports = RefCell::new(BTreeMap::new());
+        let stable_reports = RefCell::new(BTreeMap::new());
+        let collected = collect_configurations_with(
+            &configurations,
+            |configuration| {
+                assert!(
+                    targets.borrow().is_empty(),
+                    "the previous target must be released before collecting {}",
+                    configuration.artifact_name()
+                );
+                let target_dir = configuration_target_dir(&execution, configuration);
+                targets.borrow_mut().insert(target_dir.join("large-intermediate"));
+                let raw_path = scratch_dir.join(format!("raw-lcov-{}.info", configuration.artifact_name()));
+                let stable_path = coverage_dir.join(format!("lcov-{}.info", configuration.artifact_name()));
+                raw_reports.borrow_mut().insert(
+                    raw_path.clone(),
+                    if configuration == FeatureConfiguration::AllFeatures {
+                        RAW_ALL_FEATURES.to_owned()
+                    } else {
+                        RAW_NO_DEFAULT.to_owned()
+                    },
+                );
+                completed_configs.borrow_mut().push(configuration);
+                Ok(CollectedReport {
+                    raw_path,
+                    stable_path,
+                    configuration,
+                })
+            },
+            |configuration| {
+                let target = configuration_target_dir(&execution, configuration).join("large-intermediate");
+                assert!(targets.borrow_mut().remove(&target), "collected target must exist before cleanup");
+                Ok(())
+            },
+        )
+        .expect("collect both configurations");
+
+        assert_eq!(*completed_configs.borrow(), configurations);
+        assert!(
+            targets.borrow().is_empty(),
+            "completed configuration targets survive batch collection"
+        );
+        for report in &collected {
+            assert!(
+                raw_reports.borrow().contains_key(&report.raw_path),
+                "raw report must survive target cleanup"
+            );
+        }
+        assert_reports_survive_target_cleanup(&execution, &collected, &raw_reports, &stable_reports);
+    }
+
+    #[test]
+    fn configuration_cleanup_failure_stops_the_next_collection() {
+        let configurations = [FeatureConfiguration::AllFeatures, FeatureConfiguration::NoDefaultFeatures];
+        let collected = Cell::new(0);
+        let cleaned = Cell::new(0);
+        let error = collect_configurations_with(
+            &configurations,
+            |configuration| {
+                collected.set(collected.get() + 1);
+                Ok(CollectedReport {
+                    raw_path: PathBuf::from(format!("raw-{}.info", configuration.artifact_name())),
+                    stable_path: PathBuf::from(format!("stable-{}.info", configuration.artifact_name())),
+                    configuration,
+                })
+            },
+            |_| {
+                cleaned.set(cleaned.get() + 1);
+                Err(app_error("scripted configuration cleanup failure"))
+            },
+        )
+        .expect_err("cleanup failure must stop collection");
+        assert_eq!(error.to_string(), "scripted configuration cleanup failure");
+        assert_eq!(collected.get(), 1);
+        assert_eq!(cleaned.get(), 1);
+    }
+
+    #[test]
+    fn configuration_cleanup_removes_only_the_selected_target_and_preserves_raw_lcov() {
+        let workspace = workspace(Path::new("synthetic-workspace"));
+        let selection = Selection {
+            explicit: false,
+            members: workspace.members.clone(),
+        };
+        let args = collection_args();
+        let tools = ToolPrograms {
+            cargo: OsString::from("never-invoked"),
+            rustc: OsString::from("never-invoked"),
+        };
+        let scratch_dir = PathBuf::from("synthetic-scratch");
+        let target_root = scratch_dir.join("cargo-target");
+        let execution = CollectionExecution {
+            workspace: &workspace,
+            selection: &selection,
+            args: &args,
+            scratch_dir: &scratch_dir,
+            coverage_target_root: &target_root,
+            target: None,
+            tools: &tools,
+            quiet: false,
+        };
+        let configuration = FeatureConfiguration::AllFeatures;
+        let target_dir = configuration_target_dir(&execution, configuration);
+        let raw_path = scratch_dir.join(format!("raw-lcov-{}.info", configuration.artifact_name()));
+        let raw_reports = RefCell::new(BTreeMap::from([(raw_path.clone(), RAW_ALL_FEATURES.to_owned())]));
+        let removed = RefCell::new(None);
+
+        cleanup_configuration_target_with(&execution, configuration, |path| {
+            removed.replace(Some(path.to_path_buf()));
+            Ok(())
+        })
+        .expect("remove completed target");
+
+        assert_eq!(removed.into_inner(), Some(target_dir));
+        assert_eq!(
+            raw_reports.borrow().get(&raw_path).map(String::as_str),
+            Some(RAW_ALL_FEATURES),
+            "cleanup must not remove the raw LCOV"
+        );
+    }
+
+    #[test]
+    fn configuration_cleanup_failure_retains_the_native_error_and_context() {
+        let workspace = workspace(Path::new("synthetic-workspace"));
+        let selection = Selection {
+            explicit: false,
+            members: workspace.members.clone(),
+        };
+        let args = collection_args();
+        let tools = ToolPrograms {
+            cargo: OsString::from("never-invoked"),
+            rustc: OsString::from("never-invoked"),
+        };
+        let target_root = PathBuf::from("synthetic-scratch/cargo-target");
+        let scratch_dir = PathBuf::from("synthetic-scratch");
+        let execution = CollectionExecution {
+            workspace: &workspace,
+            selection: &selection,
+            args: &args,
+            scratch_dir: &scratch_dir,
+            coverage_target_root: &target_root,
+            target: None,
+            tools: &tools,
+            quiet: false,
+        };
+        let configuration = FeatureConfiguration::AllFeatures;
+        let expected_path = configuration_target_dir(&execution, configuration);
+        let native_error = io::Error::from_raw_os_error(32);
+        let expected_context = cleanup_error_context(&expected_path, Some(&native_error));
+        let observed_path = RefCell::new(None);
+        let error = cleanup_configuration_target_with(&execution, configuration, |path| {
+            observed_path.replace(Some(path.to_path_buf()));
+            Err(io::Error::from_raw_os_error(32))
+        })
+        .expect_err("injected removal failure must propagate");
+
+        assert_eq!(observed_path.into_inner(), Some(expected_path));
+        assert!(
+            error.to_string().contains(&expected_context),
+            "cleanup failure must retain `{expected_context}`: {error}"
+        );
+        assert_eq!(
+            error
+                .find_source::<io::Error>()
+                .expect("cleanup must retain the native removal error")
+                .raw_os_error(),
+            Some(32)
+        );
+    }
 
     #[test]
     #[cfg_attr(miri, ignore = "uses temporary directories, which Miri isolation does not support")]
@@ -1525,6 +1865,10 @@ mod tests {
                     ExitCode::SUCCESS
                 );
                 assert!(!scratch_path.exists(), "successful collection must release its build scratch");
+                assert!(
+                    !parent.path().join("lcov-merged.info").exists(),
+                    "collect-only publication must withhold the canonical merged report"
+                );
             }
             outputs.push(
                 collected
@@ -1537,6 +1881,120 @@ mod tests {
         assert_eq!(
             outputs[1], outputs[0],
             "split collection must preserve the same joint-filter inputs"
+        );
+    }
+
+    #[test]
+    fn collect_only_returns_merged_report_removal_errors() {
+        let workspace = workspace(Path::new("synthetic-workspace"));
+        let selection = Selection {
+            explicit: false,
+            members: workspace.members.clone(),
+        };
+        let args = CollectionArgs {
+            collect_only: true,
+            coverage_dir: PathBuf::from("synthetic-coverage"),
+            ..collection_args()
+        };
+        let tools = ToolPrograms {
+            cargo: OsString::from("never-invoked"),
+            rustc: OsString::from("never-invoked"),
+        };
+        let execution = CollectionExecution {
+            workspace: &workspace,
+            selection: &selection,
+            args: &args,
+            scratch_dir: Path::new("synthetic-scratch"),
+            coverage_target_root: Path::new("synthetic-scratch/cargo-target"),
+            target: None,
+            tools: &tools,
+            quiet: false,
+        };
+        let collected = [CollectedReport {
+            raw_path: PathBuf::from("synthetic-raw.info"),
+            stable_path: PathBuf::from("synthetic-coverage/lcov-all-features.info"),
+            configuration: FeatureConfiguration::AllFeatures,
+        }];
+        let error = filter_and_publish_reports_with_reader_and_remove(
+            &execution,
+            &collected,
+            |_| Ok(RAW_ALL_FEATURES.to_owned()),
+            |_, _| panic!("collect-only must not filter"),
+            |_| Err(io::Error::from(io::ErrorKind::PermissionDenied)),
+        )
+        .expect_err("merged-report removal failure must stop publication");
+
+        assert!(error.to_string().contains("failed to withhold merged LCOV report"), "{error}");
+        assert!(error.to_string().contains("during collection"), "{error}");
+    }
+
+    #[test]
+    fn collect_only_merged_removal_accepts_missing_and_preserves_other_errors() {
+        let path = Path::new("synthetic-coverage/lcov-merged.info");
+        assert_eq!(
+            merged_lcov_path(Path::new("synthetic-coverage")),
+            path,
+            "the canonical merged filename is a shared contract"
+        );
+        let stale = Cell::new(true);
+        withhold_merged_report_with(path, |_| {
+            assert!(stale.replace(false), "the stale report starts present");
+            Ok(())
+        })
+        .expect("a present merged report is withheld");
+        assert!(!stale.get(), "successful removal clears the stale in-memory state");
+
+        for absent in [io::ErrorKind::NotFound, io::ErrorKind::NotADirectory] {
+            remove_file_if_present_with(path, |_| Err(io::Error::from(absent)))
+                .expect("an absent or unreachable merged report is already withheld");
+        }
+        let error = remove_file_if_present_with(path, |_| Err(io::Error::from(io::ErrorKind::PermissionDenied)))
+            .expect_err("other removal failures must propagate");
+        assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+    }
+
+    #[test]
+    fn merged_publication_preserves_merge_failure_context() {
+        let workspace = workspace(Path::new("synthetic-workspace"));
+        let selection = Selection {
+            explicit: false,
+            members: workspace.members.clone(),
+        };
+        let args = CollectionArgs {
+            coverage_dir: PathBuf::from("synthetic-coverage"),
+            ..collection_args()
+        };
+        let tools = ToolPrograms {
+            cargo: OsString::from("never-invoked"),
+            rustc: OsString::from("never-invoked"),
+        };
+        let execution = CollectionExecution {
+            workspace: &workspace,
+            selection: &selection,
+            args: &args,
+            scratch_dir: Path::new("synthetic-scratch"),
+            coverage_target_root: Path::new("synthetic-scratch/cargo-target"),
+            target: None,
+            tools: &tools,
+            quiet: false,
+        };
+        let collected = [CollectedReport {
+            raw_path: PathBuf::from("synthetic-raw.info"),
+            stable_path: PathBuf::from("synthetic-coverage/lcov-all-features.info"),
+            configuration: FeatureConfiguration::AllFeatures,
+        }];
+        let error = filter_and_publish_reports_with_reader_and_remove(
+            &execution,
+            &collected,
+            |_| Ok(RAW_ALL_FEATURES.to_owned()),
+            |_, _| Ok(vec!["invalid filtered LCOV".to_owned()]),
+            |_| panic!("joint filtering does not remove a merged report"),
+        )
+        .expect_err("invalid filtered LCOV must fail merged publication");
+
+        assert!(
+            error.to_string().contains("failed to merge filtered LCOV reports for publication"),
+            "{error}"
         );
     }
 
@@ -1949,16 +2407,21 @@ mod tests {
             |raw, manifest| {
                 assert_eq!(raw, [RAW_ALL_FEATURES, RAW_NO_DEFAULT]);
                 assert_eq!(manifest, tmp.path().join("Cargo.toml"));
-                Ok(vec!["filtered all".to_owned(), "filtered no-default".to_owned()])
+                Ok(vec![RAW_ALL_FEATURES.to_owned(), RAW_NO_DEFAULT.to_owned()])
             },
         )
         .expect("filter and publish");
 
         assert_eq!(paths, collected.iter().map(|report| report.stable_path.clone()).collect::<Vec<_>>());
-        assert_eq!(fs::read_to_string(&collected[0].stable_path).expect("read all"), "filtered all");
+        assert_eq!(fs::read_to_string(&collected[0].stable_path).expect("read all"), RAW_ALL_FEATURES);
         assert_eq!(
             fs::read_to_string(&collected[1].stable_path).expect("read no-default"),
-            "filtered no-default"
+            RAW_NO_DEFAULT
+        );
+        let merged = fs::read_to_string(coverage.join("lcov-merged.info")).expect("read merged LCOV");
+        assert_eq!(
+            merged,
+            cargo_coverage_gate::merge_lcov(&[RAW_ALL_FEATURES, RAW_NO_DEFAULT]).expect("merge the exact filtered inputs")
         );
         assert!(fs::read_dir(&coverage).expect("read coverage directory").all(|entry| {
             !entry
@@ -2059,7 +2522,7 @@ mod tests {
             &execution,
             &parentless,
             |_| Ok(RAW_ALL_FEATURES.to_owned()),
-            |_, _| Ok(vec!["filtered".to_owned()]),
+            |_, _| Ok(vec![RAW_ALL_FEATURES.to_owned()]),
         )
         .expect_err("parentless stable LCOV path must fail");
         assert_eq!(
@@ -2107,7 +2570,7 @@ mod tests {
             &execution,
             &collected,
             |_| Ok(RAW_ALL_FEATURES.to_owned()),
-            |_, _| Ok(vec!["filtered".to_owned()]),
+            |_, _| Ok(vec![RAW_ALL_FEATURES.to_owned()]),
         )
         .expect_err("missing staging directory must fail");
         assert!(error.to_string().contains("failed to create temporary file"), "{error}");

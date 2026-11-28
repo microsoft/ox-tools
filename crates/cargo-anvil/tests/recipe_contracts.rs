@@ -8,6 +8,7 @@
 
 use std::collections::BTreeSet;
 use std::path::Path;
+use std::process::Command;
 
 use cargo_anvil::Catalog;
 use cargo_anvil::test_support::{Cli, run_update};
@@ -212,7 +213,8 @@ fn lightweight_workspace_checks_do_not_require_impact() {
 
 #[test]
 fn coverage_is_one_domain_tool_invocation() {
-    let recipes = generated().checks;
+    let generated = generated();
+    let recipes = &generated.checks;
     assert!(recipes.contains("cargo +{{ rust_nightly }} each {{ anvil_affected_selection }} --once --"));
     assert!(recipes.contains("{{ anvil_coverage_gate_command }} {{ anvil_explicit_package_args }} run"));
     assert!(recipes.contains("--configuration all-features --configuration no-default-features"));
@@ -220,6 +222,166 @@ fn coverage_is_one_domain_tool_invocation() {
     assert!(recipes.contains("--no-coverage-target aarch64-pc-windows-msvc"));
     assert!(!recipes.contains("Invoke-AnvilLcovReport"));
     assert!(!recipes.contains("llvm-cov.rsp"));
+}
+
+#[test]
+fn codecov_uploads_the_canonical_merged_report_only() {
+    for workflow in [
+        include_str!("../templates/github/pr-impl-workflow.yml"),
+        include_str!("../templates/github/scheduled-impl-workflow.yml"),
+    ] {
+        assert!(workflow.contains("hashFiles('target/coverage/lcov-merged.info') != ''"));
+        assert!(workflow.contains("files: target/coverage/lcov-merged.info"));
+        assert!(workflow.contains("disable_search: true"));
+        assert!(!workflow.contains("files: target/coverage/lcov-all-features.info,target/coverage/lcov-no-default.info"));
+    }
+}
+
+#[test]
+fn runtime_analysis_workflows_shard_long_checks_without_changing_family_fan_in() {
+    let pr = include_str!("../templates/github/pr-impl-workflow.yml");
+    assert!(pr.contains("check: [miri, careful, loom]"));
+    assert!(pr.contains("shard: [0, 1]"));
+    assert!(pr.contains("          - check: careful\n            shard: 1"));
+    assert!(pr.contains("          - check: loom\n            shard: 1"));
+    assert!(pr.contains("group: pr-runtime-analysis-${{ matrix.check }}"));
+    assert!(pr.contains("status_identity: pr-runtime-analysis-${{ matrix.check }}-${{ matrix.shard }}"));
+    assert!(pr.contains("ANVIL_MIRI_PACKAGE_SHARD: ${{ matrix.shard }}"));
+    assert!(pr.contains("      - pr-runtime-analysis\n"));
+    assert!(pr.contains("PR_RUNTIME_ANALYSIS: ${{ needs.pr-runtime-analysis.result }}"));
+
+    let scheduled = include_str!("../templates/github/scheduled-impl-workflow.yml");
+    for profile in ["miri", "miri-tree-borrows", "miri-strict-provenance", "miri-race-coverage"] {
+        assert!(scheduled.contains(&format!("          - {profile}\n")));
+    }
+    assert!(scheduled.contains("        shard: [0, 1]"));
+    assert!(scheduled.contains("group: scheduled-runtime-analysis-${{ matrix.profile }}"));
+    assert!(scheduled.contains("status_identity: scheduled-runtime-analysis-${{ matrix.profile }}-${{ matrix.shard }}"));
+    assert!(scheduled.contains("ANVIL_MIRI_PACKAGE_SHARD: ${{ matrix.shard }}"));
+    assert!(scheduled.contains("      - scheduled-runtime-analysis\n"));
+
+    let generated = generated();
+    assert!(generated.helpers.contains("if ($index % 2 -eq $shardIndex) { $specs[$index] }"));
+    assert!(
+        generated
+            .helpers
+            .contains("[Array]::Sort($specs, [System.StringComparer]::Ordinal)")
+    );
+    assert!(
+        generated
+            .helpers
+            .contains("[System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::Ordinal)")
+    );
+    for recipe in [
+        "anvil-pr-runtime-analysis-miri",
+        "anvil-pr-runtime-analysis-careful",
+        "anvil-pr-runtime-analysis-loom",
+        "anvil-scheduled-runtime-analysis-miri",
+        "anvil-scheduled-runtime-analysis-miri-tree-borrows",
+        "anvil-scheduled-runtime-analysis-miri-strict-provenance",
+        "anvil-scheduled-runtime-analysis-miri-race-coverage",
+    ] {
+        assert!(
+            generated.groups.lines().any(|line| line.starts_with(&format!("{recipe}:"))),
+            "missing runtime-analysis recipe: {recipe}"
+        );
+    }
+    for setup in [
+        "anvil-pr-runtime-analysis-miri-setup",
+        "anvil-pr-runtime-analysis-careful-setup",
+        "anvil-pr-runtime-analysis-loom-setup",
+        "anvil-scheduled-runtime-analysis-miri-setup",
+        "anvil-scheduled-runtime-analysis-miri-tree-borrows-setup",
+        "anvil-scheduled-runtime-analysis-miri-strict-provenance-setup",
+        "anvil-scheduled-runtime-analysis-miri-race-coverage-setup",
+    ] {
+        assert!(
+            generated.setup.lines().any(|line| line.starts_with(&format!("{setup} "))),
+            "missing runtime-analysis setup: {setup}"
+        );
+    }
+}
+
+#[test]
+fn miri_package_shards_cover_each_affected_package_once() {
+    let generated = generated();
+    let root = generated.temp.path();
+    let package_file = root.join("target/anvil/impact/affected.packages");
+    write(
+        &package_file,
+        "delta@0.1.0\nalpha@0.1.0\ncharlie@0.1.0\nbravo@0.1.0\nalpha@0.1.0\necho@0.1.0\n",
+    );
+    write(&root.join("target/anvil/impact/modified.packages"), "");
+    write(&root.join("target/anvil/impact/required.packages"), "");
+    write(
+        &root.join("Justfile"),
+        &format!(
+            "{}\n\npartition shard output: (_anvil-miri-partition shard output \"\")\n",
+            std::fs::read_to_string(root.join("Justfile")).unwrap()
+        ),
+    );
+
+    for shard in ["0", "1"] {
+        let output = Command::new("just")
+            .args(["partition", shard, &format!("target/shard-{shard}.packages")])
+            .current_dir(root)
+            .env("ANVIL_IMPACT", "consume")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "Miri partition {shard} failed:\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    let read_shard = |shard: &str| {
+        std::fs::read_to_string(root.join(format!("target/shard-{shard}.packages")))
+            .unwrap()
+            .lines()
+            .filter(|line| !line.is_empty())
+            .map(str::to_owned)
+            .collect::<BTreeSet<_>>()
+    };
+    let shard_zero = read_shard("0");
+    let shard_one = read_shard("1");
+    let expected = BTreeSet::from([
+        "alpha@0.1.0".to_owned(),
+        "bravo@0.1.0".to_owned(),
+        "charlie@0.1.0".to_owned(),
+        "delta@0.1.0".to_owned(),
+        "echo@0.1.0".to_owned(),
+    ]);
+
+    assert!(shard_zero.is_disjoint(&shard_one));
+    assert_eq!(shard_zero.union(&shard_one).cloned().collect::<BTreeSet<_>>(), expected);
+}
+
+#[test]
+fn runtime_actions_forward_an_independent_status_identity() {
+    let run_group = include_str!("../templates/github/run-group-action.yml");
+    assert!(run_group.contains("  status_identity:"));
+    assert!(run_group.contains("status_identity: ${{ inputs.status_identity }}"));
+
+    let report_status = include_str!("../templates/github/report-status-action.yml");
+    assert!(report_status.contains("  status_identity:"));
+    assert!(report_status.contains("ANVIL_STATUS_IDENTITY: ${{ inputs.status_identity }}"));
+    assert!(report_status.contains("const statusIdentity = process.env.ANVIL_STATUS_IDENTITY || group;"));
+}
+
+#[test]
+fn coverage_setup_prefers_a_workspace_catalog_tool_before_external_installation() {
+    let setup = include_str!("../templates/justfiles/anvil/setup/checks/llvm-cov.just");
+    assert!(
+        setup.contains(r"{{ just_executable() }} --justfile {{ quote(justfile()) }} _anvil-llvm-cov-setup-coverage-gate {{ installer }}")
+    );
+    assert!(setup.contains(
+        r#"{{ if anvil_coverage_gate_local_command == "" { just_executable() + " --justfile " + quote(justfile()) + " anvil-tool-cargo-coverage-gate-install " + installer }"#
+    ));
+    assert!(setup.contains(
+        r#"{{ if anvil_coverage_gate_local_command == "" { just_executable() + " --justfile " + quote(justfile()) + " anvil-tool-cargo-coverage-gate-validate-prereqs" }"#
+    ));
 }
 
 #[test]
@@ -275,7 +437,7 @@ fn released_domain_tool_versions_are_pinned() {
     let recipes = &generated.setup;
     for pin in [
         "cargo_aprz_version := \"1.2.2\"",
-        "cargo_coverage_gate_version := \"0.7.5\"",
+        "cargo_coverage_gate_version := \"0.7.7\"",
         "cargo_delta_version := \"0.5.0\"",
         "cargo_each_version := \"0.8.0\"",
         "cargo_gamma_version := \"0.8.0\"",
@@ -433,10 +595,14 @@ fn container_context_and_setup_use_all_generated_recipe_files() {
         assert!(ignore.contains(&format!("!.anvil/{path}")));
         assert!(generated.container.contains(&format!("'.anvil/{path}'")));
     }
-    assert!(dockerfile.contains("import '.anvil/anvil.just'"));
+    assert!(dockerfile.contains(r#"printf "set unstable\nimport '.anvil/anvil.just'\n" > Justfile"#));
     assert!(dockerfile.contains("ARG ANVIL_ROOT_MSRV"));
     assert!(dockerfile.contains("setup_toolchain=stable"));
-    assert!(dockerfile.contains("RUSTUP_TOOLCHAIN=\"${setup_toolchain}\" just anvil-setup"));
+    assert!(dockerfile.contains("unset RUSTUP_TOOLCHAIN"));
+    assert!(dockerfile.contains("rustup toolchain install \\\n"));
+    assert!(dockerfile.contains(r#"ANVIL_COVERAGE_GATE_LOCAL_COMMAND="" just anvil-setup binstall"#));
+    assert!(dockerfile.contains(r#"RUSTUP_TOOLCHAIN="${setup_toolchain}" ANVIL_COVERAGE_GATE_LOCAL_COMMAND="" just anvil-setup binstall"#));
+    assert!(generated.helpers.contains("[env(\"ANVIL_IMPACT\", \"off\")]"));
 }
 
 #[test]

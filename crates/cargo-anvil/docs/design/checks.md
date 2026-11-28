@@ -115,7 +115,9 @@ see [cargo-coverage-gate's accepted layouts](../../../cargo-coverage-gate/docs/d
 Workspaces owning the `cargo-coverage-gate` package and binary use that checkout's
 collector, bootstrapped in release mode to avoid retaining a separate debug build
 alongside the instrumented test builds. This does not change the coverage test
-profiles or thresholds. Other workspaces use the installed tool.
+profiles or thresholds. Setup and prerequisite validation also skip the external
+tool installation when this checkout supplies the command. Other workspaces use
+the installed tool.
 
 ### `pr-msrv`
 
@@ -230,8 +232,9 @@ which can exhaust GitHub's rate limit and wait for quota renewal.
 
 ### `scheduled-runtime-analysis`
 
-All Miri profiles cover the full workspace. Profiles run sequentially within
-each platform job; executables within a profile run concurrently.
+All Miri profiles cover the full workspace. Local and non-GitHub aggregate
+recipes run profiles sequentially, while generated GitHub jobs run each profile
+in an independent OS leg. Executables within a profile run concurrently.
 
 | Check | Additional behavior | Per-test exclusion cfg |
 |-------|---------------------|------------------------|

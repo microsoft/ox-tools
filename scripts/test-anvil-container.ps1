@@ -31,7 +31,10 @@
          reaches neither a build command nor the image filesystem.
       8. A hook returning an empty value fails closed.
       9. A hook's returned value does not change the tag; its file content does.
-     10. The recipes run natively inside the image (no nesting).
+     10. The image installs the checkout toolchain and its components while a
+         different root MSRV remains available as a bootstrap.
+     11. Full-workspace wrappers export impact mode to child processes.
+     12. The recipes run natively inside the image (no nesting).
 
 .PARAMETER Engine
     Container engine to test against. Defaults to $env:ANVIL_CONTAINER_ENGINE,
@@ -302,6 +305,7 @@ Write-Fixture (Join-Path $repo 'Cargo.toml') @'
 name = "anvil-e2e"
 version = "0.1.0"
 edition = "2021"
+rust-version = "1.85"
 
 [dependencies]
 '@
@@ -318,6 +322,9 @@ pub const fn add(left: u64, right: u64) -> u64 {
 Write-Fixture (Join-Path $repo 'rust-toolchain.toml') @'
 [toolchain]
 channel = "1.95"
+profile = "minimal"
+components = ["rust-src"]
+targets = ["wasm32-unknown-unknown"]
 '@
 Write-Fixture (Join-Path $repo 'Justfile') @'
 set unstable
@@ -336,6 +343,10 @@ e2e-show-token:
 # unless the driver mounts the common git directory.
 e2e-show-git:
     @echo "E2E-GIT:[$(git rev-parse --abbrev-ref HEAD)]"
+
+# The child name follows _anvil-unscoped's _anvil-<name> convention.
+_anvil-e2e-impact:
+    @echo "E2E-IMPACT:${ANVIL_IMPACT:-}"
 '@
 
 Invoke-Native -Command 'git' -Arguments @('init', '-q') -WorkingDirectory $repo | Out-Null
@@ -369,6 +380,10 @@ Assert-Equal 'container directory holds exactly two files' 2 $containerDir.Count
 $justList = Invoke-Just -Repo $repo -Arguments @('--list')
 Assert-That 'anvil-container is discoverable in just --list' ($justList.StdOut -match 'anvil-container')
 
+$dockerfileBody = Get-Content -LiteralPath $dockerfile -Raw
+Assert-That 'the generated bootstrap enables unstable Just features' `
+    ($dockerfileBody.Contains("printf `"set unstable\nimport '.anvil/anvil.just'\n`" > Justfile"))
+
 # ------------------------------------------------------------- 2. first run --
 
 Write-Section '2. First run builds the image'
@@ -384,6 +399,68 @@ Write-Detail (($firstRun.StdErr -split "`r?`n" | Select-Object -Last 4) -join "`
 Assert-Equal 'anvil-fmt succeeds inside the container' 0 $firstRun.ExitCode
 Assert-That 'the run reported building the image' ($firstRun.StdErr -match 'building .*(inputs changed|first run)')
 Assert-That 'image is present afterwards' (Test-ImagePresent $reference)
+
+# The Miri runtime split reads the same downloaded affected-package set on
+# every hosted leg. Prove the ordinal partition is stable and lossless before
+# checking the generated toolchain contracts.
+$impactDir = Join-Path $repo 'target/anvil/impact'
+Write-Fixture (Join-Path $impactDir 'modified.packages') ''
+Write-Fixture (Join-Path $impactDir 'affected.packages') @'
+zeta@1.0.0
+alpha@1.0.0
+middle@1.0.0
+beta@1.0.0
+alpha@1.0.0
+'@
+Write-Fixture (Join-Path $impactDir 'required.packages') ''
+$partition0Path = 'target/anvil/miri-shard-0.packages'
+$partition1Path = 'target/anvil/miri-shard-1.packages'
+$partition0 = Invoke-Just -Repo $repo `
+    -Arguments @('anvil-container', 'just', '_anvil-miri-partition', '0', $partition0Path) `
+    -Environment @{ ANVIL_IMPACT = 'consume' }
+$partition1 = Invoke-Just -Repo $repo `
+    -Arguments @('anvil-container', 'just', '_anvil-miri-partition', '1', $partition1Path) `
+    -Environment @{ ANVIL_IMPACT = 'consume' }
+Assert-Equal 'Miri shard zero is materialized' 0 $partition0.ExitCode
+Assert-Equal 'Miri shard one is materialized' 0 $partition1.ExitCode
+$shard0 = @(Get-Content -LiteralPath (Join-Path $repo $partition0Path) | Where-Object { $_ })
+$shard1 = @(Get-Content -LiteralPath (Join-Path $repo $partition1Path) | Where-Object { $_ })
+Assert-Equal 'Miri shard zero uses the first ordinal half' `
+    '["alpha@1.0.0","middle@1.0.0"]' (ConvertTo-Json -InputObject $shard0 -Compress)
+Assert-Equal 'Miri shard one uses the second ordinal half' `
+    '["beta@1.0.0","zeta@1.0.0"]' (ConvertTo-Json -InputObject $shard1 -Compress)
+$combined = @($shard0 + $shard1 | Sort-Object -Unique)
+Assert-Equal 'Miri shards cover each affected package exactly once' `
+    '["alpha@1.0.0","beta@1.0.0","middle@1.0.0","zeta@1.0.0"]' `
+    (ConvertTo-Json -InputObject $combined -Compress)
+
+$checkoutCompiler = Invoke-Just -Repo $repo -Arguments @(
+    'anvil-container', 'env', 'RUSTUP_AUTO_INSTALL=0', 'rustc', '--version'
+)
+Assert-Equal 'the checkout toolchain runs with automatic installation disabled' 0 $checkoutCompiler.ExitCode
+Assert-That 'the checkout toolchain overrides the root MSRV' `
+    ($checkoutCompiler.StdOut -match 'rustc 1\.95\.\d+') "$($checkoutCompiler.StdOut)$($checkoutCompiler.StdErr)"
+
+$checkoutComponents = Invoke-Just -Repo $repo -Arguments @(
+    'anvil-container', 'rustup', 'component', 'list', '--toolchain', '1.95', '--installed'
+)
+Assert-Equal 'the checkout toolchain components are queryable' 0 $checkoutComponents.ExitCode
+Assert-That 'the checkout toolchain includes its file-declared rust-src component' `
+    ($checkoutComponents.StdOut -match '(?m)^rust-src\r?$') $checkoutComponents.StdOut
+
+$checkoutTargets = Invoke-Just -Repo $repo -Arguments @(
+    'anvil-container', 'rustup', 'target', 'list', '--toolchain', '1.95', '--installed'
+)
+Assert-Equal 'the checkout toolchain targets are queryable' 0 $checkoutTargets.ExitCode
+Assert-That 'the checkout toolchain includes its file-declared non-host target' `
+    ($checkoutTargets.StdOut -match '(?m)^wasm32-unknown-unknown\r?$') $checkoutTargets.StdOut
+
+$unscopedImpact = Invoke-Just -Repo $repo `
+    -Arguments @('anvil-container', 'just', '_anvil-unscoped', 'e2e-impact') `
+    -Environment @{ ANVIL_IMPACT = 'consume' }
+Assert-Equal 'the unscoped wrapper runs its probe' 0 $unscopedImpact.ExitCode
+Assert-That 'the unscoped wrapper exports impact off to the child' `
+    ($unscopedImpact.StdOut -match 'E2E-IMPACT:off') $unscopedImpact.StdOut
 
 # ------------------------------------------------------------ 3. second run --
 

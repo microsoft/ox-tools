@@ -23,9 +23,12 @@ The host needs Git, `just`, PowerShell Core (`pwsh`), and a running container
 engine. Anvil installs none of these and manages no virtual machine.
 
 The image installs tools through `just anvil-setup binstall`. A root
-`rust-toolchain.toml` or `rust-toolchain` is honored when present; otherwise the
-declared root MSRV selects the default compiler. The host's `RUSTUP_TOOLCHAIN`
-is not inherited.
+`rust-toolchain.toml` or `rust-toolchain` selects the setup compiler, and the
+image explicitly installs that toolchain with its declared components and
+targets. A declared root MSRV provides a deterministic bootstrap before setup;
+without a toolchain file it remains selected for setup. Stable supplies the
+bootstrap when neither declaration exists. The host's `RUSTUP_TOOLCHAIN` is not
+inherited.
 
 ## 2. Commands and controls
 

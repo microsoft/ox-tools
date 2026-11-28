@@ -4,8 +4,10 @@
 # Update cargo-anvil and regenerate; repository-specific edits stop automatic updates.
 # Regenerate with cargo-anvil to update this file.
 
-# Used by scheduled and full wrappers to disable impact scoping before dependencies run.
+# Scheduled and full wrappers pass impact mode through both Just configuration
+# and the process environment before the child evaluates its dependencies.
 [private]
 [no-exit-message]
+[env("ANVIL_IMPACT", "off")]
 _anvil-unscoped name:
     {{ just_executable() }} --justfile {{ quote(justfile()) }} --set anvil_impact_override off _anvil-{{ name }}

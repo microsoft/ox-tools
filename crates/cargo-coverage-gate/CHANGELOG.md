@@ -2,6 +2,19 @@
 
 ## [Unreleased]
 
+## [0.7.7] - 2026-11-27
+
+- 🐛 Bug Fixes
+
+  - cargo-coverage-gate: centralize stale report removal
+  - cargo-coverage-gate: preserve unusable directory diagnostics
+  - cargo-coverage-gate: preserve merged LCOV witnesses
+  - cargo-coverage-gate: clear stale merged report before collection
+  - cargo-coverage-gate: withhold split merged LCOV
+  - cargo-coverage-gate: publish canonical merged LCOV
+  - cargo-anvil: use workspace coverage gate during setup
+  - cargo-coverage-gate: release configuration targets
+
 ## [0.7.6] - 2026-11-27
 
 - ✨ Features

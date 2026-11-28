@@ -32,6 +32,12 @@ inputs:
       Clean runs only supersede prior failures.
     default: "false"
     required: false
+  status_identity:
+    description: >-
+      Identity used only for supplemental status reconciliation. Defaults to
+      the execution group when parallel jobs use the same setup and group.
+    default: ""
+    required: false
 runs:
   using: composite
   steps:
@@ -84,6 +90,7 @@ runs:
       uses: ./.anvil/github/actions/report-status
       with:
         group: ${{ inputs.group }}
+        status_identity: ${{ inputs.status_identity }}
         setup_outcome: ${{ steps.setup.outcome }}
         exit_code: ${{ steps.run.outputs.exit_code }}
         failed_recipe: ${{ steps.run.outputs.failed_recipe }}

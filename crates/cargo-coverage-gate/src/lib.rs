@@ -200,10 +200,10 @@
 //! LCOV files to the released surface before evaluation.
 //! `cargo coverage-gate run` collects `all-features` and
 //! `no-default-features` coverage with cargo-llvm-cov plus nextest by default,
-//! writes released-surface-filtered `lcov-all-features.info` and
-//! `lcov-no-default.info` under `target/coverage`, and evaluates those exact
-//! files in-process. CI integrations can upload those same artifacts to
-//! Codecov or Azure DevOps. Collection can
+//! writes released-surface-filtered `lcov-all-features.info`,
+//! `lcov-no-default.info`, and `lcov-merged.info` under `target/coverage`.
+//! The local gate evaluates the two configuration files in-process and the
+//! merged file is the canonical hosted-reporting artifact. Collection can
 //! be limited with repeatable `--package` selectors; no selectors means the
 //! workspace. Use repeatable `--configuration`, `--coverage-dir`, and `--jobs`
 //! options to customize collection.
@@ -402,6 +402,22 @@ pub fn filter_lcov(lcov_text: &str, manifest_path: Option<&Path>) -> Result<Stri
 /// as [`filter_lcov`]; any failing input aborts the operation.
 pub fn filter_lcov_many(lcov_texts: &[&str], manifest_path: Option<&Path>) -> Result<Vec<String>, CoverageGateError> {
     filter_lcov_many_with_metadata_loader(lcov_texts, manifest_path, workspace::load_metadata)
+}
+
+/// Merge independent LCOV reports at the source-line level.
+///
+/// The returned tracefile contains the union of source lines. Each execution
+/// count is the maximum count for that line across the inputs, with conflicting
+/// source checksums rejected. This is the line semantics used by multi-input
+/// policy evaluation and hosted coverage publication.
+///
+/// # Errors
+///
+/// Returns [`CoverageGateError`] if any input is malformed or assigns different
+/// checksums to the same source line.
+pub fn merge_lcov(lcov_texts: &[&str]) -> Result<String, CoverageGateError> {
+    let reports = source_filter::parse_reports(lcov_texts)?;
+    lcov_cov::merge_lcov_reports(reports)
 }
 
 fn filter_lcov_with_metadata_loader(

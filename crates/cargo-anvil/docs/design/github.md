@@ -50,6 +50,17 @@ Linux x64 and ARM64; scheduled exhaustive checks run only on Linux and Windows
 x64. Changing these axes requires customizing the implementation workflows.
 Excluding a check from the catalog does not remove its workflow job.
 
+Runtime analysis fans each OS out into independent jobs: PR jobs run Careful
+and Loom separately and split Miri into two deterministic package shards;
+scheduled jobs split each Miri profile the same way. The shards are generated
+from an ordinal-sorted, deduplicated affected-package set, alternating between
+shards, so every package runs exactly once for each profile. Every leg remains
+inside the same `pr-runtime-analysis` or `scheduled-runtime-analysis` matrix
+family, so the existing required aggregate still observes every check. Local
+aggregate recipes retain their sequential composition. Shards remain the same
+base setup and execution group; the workflow exports the shard for package
+selection and gives supplemental commit statuses a distinct identity.
+
 The GitHub backend also emits a code-review skill and linked test-review rules
 under `.github/skills/code-review/`. These are agent guidance, not CI jobs.
 The adoption skill and repository-wide Anvil instructions under `.github/`
@@ -155,7 +166,9 @@ Anvil / license-headers [pr-fast] (linux-x64)
 These statuses target the PR head SHA and link to the workflow run. Setup
 failures report `error`; recipe failures report `failure`. Clean runs add no
 new status, but supersede earlier failures for the same group and runner with
-`success`. A rerun leaves the prior failure visible until its result is known.
+`success`. Parallel shards of one group use distinct identities, so a clean
+shard cannot supersede another shard's failure on the same runner. A rerun
+leaves the prior failure visible until its result is known.
 
 GitHub cannot delete commit statuses: superseded rows and their context names
 remain repository metadata. **Do not require supplemental status contexts.**
@@ -171,11 +184,14 @@ sizes while retaining coverage line information. Keeping both profiles aligned
 also keeps nested Cargo builds and nextest binary inventories consistent.
 These overrides apply only to the GitHub test-group steps.
 
-PR and scheduled test jobs upload the same released-surface-filtered LCOV
-files evaluated by the local gate. Both `lcov-all-features.info` and
-`lcov-no-default.info` must exist; completed reports can upload after a group
-failure. Windows ARM is excluded because its LLVM profiles are unusable.
-Uploads carry per-OS flags, plus `scheduled` for scheduled runs.
+PR and scheduled test jobs upload the released-surface-filtered
+`lcov-merged.info` report. It uses the maximum hit count for each source line
+across feature configurations, matching the local gate's union semantics while
+preventing one input from replacing another inside Codecov. The separate
+`lcov-all-features.info` and `lcov-no-default.info` files remain available to
+the local gate and can exist after a group failure. Windows ARM is excluded
+because its LLVM profiles are unusable. Uploads carry per-OS flags, plus
+`scheduled` for scheduled runs.
 
 Both reusable workflows accept optional `CODECOV_TOKEN`, forwarded by the
 default roots. Configure it for repositories requiring authenticated uploads.
