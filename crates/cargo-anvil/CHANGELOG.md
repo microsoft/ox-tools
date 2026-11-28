@@ -2,10 +2,11 @@
 
 ## [Unreleased]
 
-## [0.29.2] - 2026-11-27
+## [0.29.2] - 2026-11-28
 
 - 🐛 Bug Fixes
 
+  - cargo-anvil: shard Miri package jobs
   - cargo-anvil: shard runtime analysis jobs
   - cargo-anvil: disable Codecov report discovery
   - cargo-coverage-gate: publish canonical merged LCOV
@@ -20,6 +21,7 @@
 
 - ✔️ Tasks
 
+  - cargo-anvil: refresh runtime sharding release note
   - cargo-anvil: refresh Codecov upload release note
   - cargo-anvil: release v0.29.2 with coverage gate v0.7.7
 
