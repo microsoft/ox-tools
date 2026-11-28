@@ -192,7 +192,18 @@ anvil_miri_build_dir_layout_opt_out := if os() == "windows" { "1" } else { env("
 anvil_miri_race_seed_windows := "01=1..3 02=3..5 03=5..7 04=7..9 05=9..11 06=11..13 07=13..15 08=15..17 09=17..19 10=19..21 11=21..23 12=23..25 13=25..27 14=27..29 15=29..31 16=31..33 17=33..35 18=35..37 19=37..39 20=39..41 21=41..43 22=43..45 23=45..47 24=47..49 25=49..51 26=51..53 27=53..55 28=55..57 29=57..59 30=59..61 31=61..63"
 anvil_miri_race_seed_window := replace_regex(anvil_miri_race_seed_windows, ".*(?:^| )" + datetime("%d") + "=([^ ]+)(?: |$).*", "$1")
 
-anvil_miri_selection(package) := if package == "" { anvil_affected_selection } else { "--package " + quote(package) }
+anvil_miri_package_file(shard, output) := if output != "" {
+    output
+} else {
+    "target" / "anvil" / ("miri-packages-" + just_pid() + "-" + shard + ".packages")
+}
+anvil_miri_selection(package, shard, output) := if package != "" {
+    "--package " + quote(package)
+} else if shard != "" {
+    "--package-file " + quote(anvil_miri_package_file(shard, output))
+} else {
+    anvil_affected_selection
+}
 
 anvil_miri_flags(profile) := trim(if profile == "tree-borrows" { "-Zmiri-tree-borrows " + env("MIRIFLAGS", "") } else if profile == "strict-provenance" { "-Zmiri-strict-provenance " + env("MIRIFLAGS", "") } else if profile == "race-coverage" { "-Zmiri-many-seeds=" + anvil_miri_race_seed_window + " " + env("MIRIFLAGS", "") } else { env("MIRIFLAGS", "") })
 
@@ -208,14 +219,60 @@ anvil_cargo_env_config(name, value) := "--config " + quote("env." + name + ".val
 [env(anvil_miri_library_path_name, anvil_miri_library_path)]
 [env("__CARGO_TEMPORARY_BUILD_DIR_NEW_LAYOUT_OPT_OUT", anvil_miri_build_dir_layout_opt_out)]
 [private]
-_anvil-miri-test profile package="" test_filter="" example="": anvil-impact _ensure-target-dir
+_anvil-miri-test profile package="" test_filter="" example="" shard="": (_anvil-miri-partition shard "" package) _ensure-target-dir
     {{ if profile == "standard" || profile == "tree-borrows" || profile == "strict-provenance" || profile == "race-coverage" { "# valid Miri profile" } else { error("anvil miri: unknown profile '" + profile + "'") } }}
     {{ if test_filter != "" && example != "" { error("anvil-miri: choose exactly one of --test or --example") } else { "# valid test/example selection" } }}
     {{ if example != "" && package == "" { error("anvil-miri: --example requires --package to avoid workspace ambiguity") } else { "# valid example package selection" } }}
-    {{ if example == "" { "# " } else { "" } }}cargo +{{ rust_nightly }} {{ anvil_cargo_env_config("MIRIFLAGS", anvil_miri_flags(profile)) }} {{ anvil_cargo_env_config("RUSTFLAGS", anvil_miri_rustflags(profile)) }} each {{ anvil_miri_selection(package) }} --filter {{ quote("not metadata:anvil.miri.exclude=true") }} --once -- cargo +{{ rust_nightly }} miri run '{packages}' --all-features --locked --example {{ quote(example) }}
-    {{ if example != "" { "# " } else { "" } }}cargo +{{ rust_nightly }} {{ anvil_cargo_env_config("MIRIFLAGS", anvil_miri_flags(profile)) }} {{ anvil_cargo_env_config("RUSTFLAGS", anvil_miri_rustflags(profile)) }} each {{ anvil_miri_selection(package) }} --filter {{ quote("not metadata:anvil.miri.exclude=true") }} --once -- cargo +{{ rust_nightly }} miri test '{packages}' --all-features --tests --no-run --locked --message-format=json,json-render-diagnostics > {{ quote(anvil_miri_artifacts_file) }}
+    {{ if example == "" { "# " } else { "" } }}cargo +{{ rust_nightly }} {{ anvil_cargo_env_config("MIRIFLAGS", anvil_miri_flags(profile)) }} {{ anvil_cargo_env_config("RUSTFLAGS", anvil_miri_rustflags(profile)) }} each {{ anvil_miri_selection(package, shard, "") }} --filter {{ quote("not metadata:anvil.miri.exclude=true") }} --once -- cargo +{{ rust_nightly }} miri run '{packages}' --all-features --locked --example {{ quote(example) }}
+    {{ if example != "" { "# " } else { "" } }}cargo +{{ rust_nightly }} {{ anvil_cargo_env_config("MIRIFLAGS", anvil_miri_flags(profile)) }} {{ anvil_cargo_env_config("RUSTFLAGS", anvil_miri_rustflags(profile)) }} each {{ anvil_miri_selection(package, shard, "") }} --filter {{ quote("not metadata:anvil.miri.exclude=true") }} --once -- cargo +{{ rust_nightly }} miri test '{packages}' --all-features --tests --no-run --locked --message-format=json,json-render-diagnostics > {{ quote(anvil_miri_artifacts_file) }}
     {{ if example != "" { "# " } else { "" } }}cargo +{{ rust_nightly }} {{ anvil_cargo_env_config("MIRIFLAGS", anvil_miri_flags(profile)) }} each --json-lines-file {{ quote(anvil_miri_artifacts_file) }} --json-filter {{ quote("reason=compiler-artifact and profile.test=true and executable") }} --json-work-dir-parent manifest_path --jobs {{ quote(env("ANVIL_MIRI_JOBS", "auto")) }} --keep-going -- rustup run {{ rust_nightly }} cargo-miri runner '{json:executable}' {{ if test_filter == "" { "" } else { quote(test_filter) } }}
     {{ if example != "" { "# " } else { "" } }}rm {{ quote(anvil_miri_artifacts_file) }}
+
+# Materialize one deterministic half of the Miri package set. The two hosted
+# jobs use ordinal-sorted, deduplicated specs with alternating indices, so
+# every selected package appears in exactly one shard.
+[private]
+[script("pwsh", "-NoProfile")]
+_anvil-miri-partition shard="" output="" package="": anvil-impact
+    Set-StrictMode -Version Latest
+    $ErrorActionPreference = 'Stop'
+    $PSNativeCommandUseErrorActionPreference = $true
+    $package = '{{ package }}'
+    $requestedShard = '{{ shard }}'
+    if ([string]::IsNullOrEmpty($requestedShard) -or -not [string]::IsNullOrEmpty($package)) { exit 0 }
+    if ($requestedShard -notin @('0', '1')) { throw "anvil-miri: package shard must be 0 or 1" }
+
+    if ('{{ anvil_impact_mode }}' -eq 'off') {
+        $metadata = (& cargo {{ anvil_stable_toolchain_arg }} metadata --no-deps --format-version 1 | Out-String) | ConvertFrom-Json
+        $members = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::Ordinal)
+        foreach ($member in $metadata.workspace_members) { [void]$members.Add([string]$member) }
+        [string[]]$specs = @(
+            $metadata.packages |
+                Where-Object { $members.Contains([string]$_.id) } |
+                ForEach-Object { "$($_.name)@$($_.version)" }
+        )
+    } else {
+        [string[]]$specs = @(Get-Content -LiteralPath '{{ anvil_impact_input_dir }}/affected.packages' -ErrorAction Stop |
+            ForEach-Object { $_.Trim() } |
+            Where-Object { -not [string]::IsNullOrEmpty($_) })
+    }
+    $unique = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::Ordinal)
+    foreach ($spec in $specs) { [void]$unique.Add($spec) }
+    [string[]]$specs = @($unique)
+    [Array]::Sort($specs, [System.StringComparer]::Ordinal)
+
+    $shardIndex = [int]$requestedShard
+    [string[]]$selected = @(
+        for ($index = 0; $index -lt $specs.Length; $index++) {
+            if ($index % 2 -eq $shardIndex) { $specs[$index] }
+        }
+    )
+    $outputPath = '{{ anvil_miri_package_file(shard, output) }}'
+    $outputDirectory = Split-Path -Parent $outputPath
+    if (-not [string]::IsNullOrEmpty($outputDirectory)) {
+        New-Item -ItemType Directory -Path $outputDirectory -Force | Out-Null
+    }
+    Set-Content -LiteralPath $outputPath -Value ($selected -join [Environment]::NewLine) -Encoding UTF8 -NoNewline
 
 anvil_mutants_diff_dir := env("RUNNER_TEMP", env("AGENT_TEMPDIRECTORY", env("TEMP", env("TMPDIR", "."))))
 anvil_mutants_diff_file := anvil_mutants_diff_dir / ("anvil-mutants-diff-" + just_pid() + ".diff")
@@ -270,20 +327,36 @@ _anvil-scheduled-runtime-analysis: anvil-scheduled-runtime-analysis-validate-pre
     anvil-miri-race-coverage
 
 [private]
-_anvil-scheduled-runtime-analysis-miri: anvil-scheduled-runtime-analysis-miri-validate-prereqs \
-    anvil-miri
+_anvil-scheduled-runtime-analysis-miri-0: anvil-scheduled-runtime-analysis-miri-0-validate-prereqs \
+    (_anvil-miri-test "standard" "" "" "" "0")
 
 [private]
-_anvil-scheduled-runtime-analysis-miri-tree-borrows: anvil-scheduled-runtime-analysis-miri-tree-borrows-validate-prereqs \
-    anvil-miri-tree-borrows
+_anvil-scheduled-runtime-analysis-miri-1: anvil-scheduled-runtime-analysis-miri-1-validate-prereqs \
+    (_anvil-miri-test "standard" "" "" "" "1")
 
 [private]
-_anvil-scheduled-runtime-analysis-miri-strict-provenance: anvil-scheduled-runtime-analysis-miri-strict-provenance-validate-prereqs \
-    anvil-miri-strict-provenance
+_anvil-scheduled-runtime-analysis-miri-tree-borrows-0: anvil-scheduled-runtime-analysis-miri-tree-borrows-0-validate-prereqs \
+    (_anvil-miri-test "tree-borrows" "" "" "" "0")
 
 [private]
-_anvil-scheduled-runtime-analysis-miri-race-coverage: anvil-scheduled-runtime-analysis-miri-race-coverage-validate-prereqs \
-    anvil-miri-race-coverage
+_anvil-scheduled-runtime-analysis-miri-tree-borrows-1: anvil-scheduled-runtime-analysis-miri-tree-borrows-1-validate-prereqs \
+    (_anvil-miri-test "tree-borrows" "" "" "" "1")
+
+[private]
+_anvil-scheduled-runtime-analysis-miri-strict-provenance-0: anvil-scheduled-runtime-analysis-miri-strict-provenance-0-validate-prereqs \
+    (_anvil-miri-test "strict-provenance" "" "" "" "0")
+
+[private]
+_anvil-scheduled-runtime-analysis-miri-strict-provenance-1: anvil-scheduled-runtime-analysis-miri-strict-provenance-1-validate-prereqs \
+    (_anvil-miri-test "strict-provenance" "" "" "" "1")
+
+[private]
+_anvil-scheduled-runtime-analysis-miri-race-coverage-0: anvil-scheduled-runtime-analysis-miri-race-coverage-0-validate-prereqs \
+    (_anvil-miri-test "race-coverage" "" "" "" "0")
+
+[private]
+_anvil-scheduled-runtime-analysis-miri-race-coverage-1: anvil-scheduled-runtime-analysis-miri-race-coverage-1-validate-prereqs \
+    (_anvil-miri-test "race-coverage" "" "" "" "1")
 
 # Used by anvil-scheduled-exhaustive to run exhaustive workspace checks.
 [private]

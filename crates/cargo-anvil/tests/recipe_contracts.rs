@@ -239,25 +239,52 @@ fn codecov_uploads_the_canonical_merged_report_only() {
 #[test]
 fn runtime_analysis_workflows_shard_long_checks_without_changing_family_fan_in() {
     let pr = include_str!("../templates/github/pr-impl-workflow.yml");
-    assert!(pr.contains("check: [miri, careful, loom]"));
+    assert!(pr.contains("check: [miri-0, miri-1, careful, loom]"));
     assert!(pr.contains("group: pr-runtime-analysis-${{ matrix.check }}"));
     assert!(pr.contains("      - pr-runtime-analysis\n"));
     assert!(pr.contains("PR_RUNTIME_ANALYSIS: ${{ needs.pr-runtime-analysis.result }}"));
 
     let scheduled = include_str!("../templates/github/scheduled-impl-workflow.yml");
-    assert!(scheduled.contains("profile: [miri, miri-tree-borrows, miri-strict-provenance, miri-race-coverage]"));
+    for profile in [
+        "miri-0",
+        "miri-1",
+        "miri-tree-borrows-0",
+        "miri-tree-borrows-1",
+        "miri-strict-provenance-0",
+        "miri-strict-provenance-1",
+        "miri-race-coverage-0",
+        "miri-race-coverage-1",
+    ] {
+        assert!(scheduled.contains(&format!("          - {profile}\n")));
+    }
     assert!(scheduled.contains("group: scheduled-runtime-analysis-${{ matrix.profile }}"));
     assert!(scheduled.contains("      - scheduled-runtime-analysis\n"));
 
     let generated = generated();
+    assert!(generated.helpers.contains("if ($index % 2 -eq $shardIndex) { $specs[$index] }"));
+    assert!(
+        generated
+            .helpers
+            .contains("[Array]::Sort($specs, [System.StringComparer]::Ordinal)")
+    );
+    assert!(
+        generated
+            .helpers
+            .contains("[System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::Ordinal)")
+    );
     for recipe in [
-        "anvil-pr-runtime-analysis-miri",
+        "anvil-pr-runtime-analysis-miri-0",
+        "anvil-pr-runtime-analysis-miri-1",
         "anvil-pr-runtime-analysis-careful",
         "anvil-pr-runtime-analysis-loom",
-        "anvil-scheduled-runtime-analysis-miri",
-        "anvil-scheduled-runtime-analysis-miri-tree-borrows",
-        "anvil-scheduled-runtime-analysis-miri-strict-provenance",
-        "anvil-scheduled-runtime-analysis-miri-race-coverage",
+        "anvil-scheduled-runtime-analysis-miri-0",
+        "anvil-scheduled-runtime-analysis-miri-1",
+        "anvil-scheduled-runtime-analysis-miri-tree-borrows-0",
+        "anvil-scheduled-runtime-analysis-miri-tree-borrows-1",
+        "anvil-scheduled-runtime-analysis-miri-strict-provenance-0",
+        "anvil-scheduled-runtime-analysis-miri-strict-provenance-1",
+        "anvil-scheduled-runtime-analysis-miri-race-coverage-0",
+        "anvil-scheduled-runtime-analysis-miri-race-coverage-1",
     ] {
         assert!(
             generated.groups.lines().any(|line| line.starts_with(&format!("{recipe}:"))),
@@ -265,13 +292,18 @@ fn runtime_analysis_workflows_shard_long_checks_without_changing_family_fan_in()
         );
     }
     for setup in [
-        "anvil-pr-runtime-analysis-miri-setup",
+        "anvil-pr-runtime-analysis-miri-0-setup",
+        "anvil-pr-runtime-analysis-miri-1-setup",
         "anvil-pr-runtime-analysis-careful-setup",
         "anvil-pr-runtime-analysis-loom-setup",
-        "anvil-scheduled-runtime-analysis-miri-setup",
-        "anvil-scheduled-runtime-analysis-miri-tree-borrows-setup",
-        "anvil-scheduled-runtime-analysis-miri-strict-provenance-setup",
-        "anvil-scheduled-runtime-analysis-miri-race-coverage-setup",
+        "anvil-scheduled-runtime-analysis-miri-0-setup",
+        "anvil-scheduled-runtime-analysis-miri-1-setup",
+        "anvil-scheduled-runtime-analysis-miri-tree-borrows-0-setup",
+        "anvil-scheduled-runtime-analysis-miri-tree-borrows-1-setup",
+        "anvil-scheduled-runtime-analysis-miri-strict-provenance-0-setup",
+        "anvil-scheduled-runtime-analysis-miri-strict-provenance-1-setup",
+        "anvil-scheduled-runtime-analysis-miri-race-coverage-0-setup",
+        "anvil-scheduled-runtime-analysis-miri-race-coverage-1-setup",
     ] {
         assert!(
             generated.setup.lines().any(|line| line.starts_with(&format!("{setup} "))),

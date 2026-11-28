@@ -50,12 +50,14 @@ Linux x64 and ARM64; scheduled exhaustive checks run only on Linux and Windows
 x64. Changing these axes requires customizing the implementation workflows.
 Excluding a check from the catalog does not remove its workflow job.
 
-Runtime analysis fans each OS out into independent jobs: PR jobs run Miri,
-Careful, and Loom separately, while scheduled jobs run each Miri profile
-separately. Every leg remains inside the same `pr-runtime-analysis` or
-`scheduled-runtime-analysis` matrix family, so the existing required aggregate
-still observes every check. Local aggregate recipes retain their sequential
-composition.
+Runtime analysis fans each OS out into independent jobs: PR jobs run Careful
+and Loom separately and split Miri into two deterministic package shards;
+scheduled jobs split each Miri profile the same way. The shards are generated
+from an ordinal-sorted, deduplicated affected-package set, alternating between
+shards, so every package runs exactly once for each profile. Every leg remains
+inside the same `pr-runtime-analysis` or `scheduled-runtime-analysis` matrix
+family, so the existing required aggregate still observes every check. Local
+aggregate recipes retain their sequential composition.
 
 The GitHub backend also emits a code-review skill and linked test-review rules
 under `.github/skills/code-review/`. These are agent guidance, not CI jobs.

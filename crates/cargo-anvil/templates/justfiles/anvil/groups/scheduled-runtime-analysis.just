@@ -8,18 +8,28 @@
 [group("anvil")]
 anvil-scheduled-runtime-analysis: (_anvil-unscoped "scheduled-runtime-analysis")
 
-# Run the standard scheduled Miri profile in an independent hosted job.
+# Run shard zero of the standard scheduled Miri profile.
 [group("anvil")]
-anvil-scheduled-runtime-analysis-miri: (_anvil-unscoped "scheduled-runtime-analysis-miri")
+anvil-scheduled-runtime-analysis-miri-0: (_anvil-unscoped "scheduled-runtime-analysis-miri-0")
 
-# Run the tree-borrows scheduled Miri profile in an independent hosted job.
+# Run shard one of the standard scheduled Miri profile.
 [group("anvil")]
-anvil-scheduled-runtime-analysis-miri-tree-borrows: (_anvil-unscoped "scheduled-runtime-analysis-miri-tree-borrows")
+anvil-scheduled-runtime-analysis-miri-1: (_anvil-unscoped "scheduled-runtime-analysis-miri-1")
 
-# Run the strict-provenance scheduled Miri profile in an independent hosted job.
+# Run both shards of the scheduled tree-borrows Miri profile.
 [group("anvil")]
-anvil-scheduled-runtime-analysis-miri-strict-provenance: (_anvil-unscoped "scheduled-runtime-analysis-miri-strict-provenance")
+anvil-scheduled-runtime-analysis-miri-tree-borrows-0: (_anvil-unscoped "scheduled-runtime-analysis-miri-tree-borrows-0")
+[group("anvil")]
+anvil-scheduled-runtime-analysis-miri-tree-borrows-1: (_anvil-unscoped "scheduled-runtime-analysis-miri-tree-borrows-1")
 
-# Run the race-coverage scheduled Miri profile in an independent hosted job.
+# Run both shards of the scheduled strict-provenance Miri profile.
 [group("anvil")]
-anvil-scheduled-runtime-analysis-miri-race-coverage: (_anvil-unscoped "scheduled-runtime-analysis-miri-race-coverage")
+anvil-scheduled-runtime-analysis-miri-strict-provenance-0: (_anvil-unscoped "scheduled-runtime-analysis-miri-strict-provenance-0")
+[group("anvil")]
+anvil-scheduled-runtime-analysis-miri-strict-provenance-1: (_anvil-unscoped "scheduled-runtime-analysis-miri-strict-provenance-1")
+
+# Run both shards of the scheduled race-coverage Miri profile.
+[group("anvil")]
+anvil-scheduled-runtime-analysis-miri-race-coverage-0: (_anvil-unscoped "scheduled-runtime-analysis-miri-race-coverage-0")
+[group("anvil")]
+anvil-scheduled-runtime-analysis-miri-race-coverage-1: (_anvil-unscoped "scheduled-runtime-analysis-miri-race-coverage-1")

@@ -114,7 +114,15 @@ jobs:
       fail-fast: false
       matrix:
         os: [linux, windows, linux-arm, windows-arm]
-        profile: [miri, miri-tree-borrows, miri-strict-provenance, miri-race-coverage]
+        profile:
+          - miri-0
+          - miri-1
+          - miri-tree-borrows-0
+          - miri-tree-borrows-1
+          - miri-strict-provenance-0
+          - miri-strict-provenance-1
+          - miri-race-coverage-0
+          - miri-race-coverage-1
     runs-on: ${{ matrix.os == 'linux' && inputs.linux_runner
       || matrix.os == 'windows' && inputs.windows_runner
       || matrix.os == 'linux-arm' && inputs.linux_arm_runner

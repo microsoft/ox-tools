@@ -11,10 +11,15 @@ anvil-pr-runtime-analysis: anvil-pr-runtime-analysis-validate-prereqs \
     anvil-careful \
     anvil-loom
 
-# Run the Miri slice used by hosted PR runtime-analysis jobs.
+# Run shard zero of the Miri PR package set.
 [group("anvil")]
-anvil-pr-runtime-analysis-miri: anvil-pr-runtime-analysis-miri-validate-prereqs \
-    anvil-miri
+anvil-pr-runtime-analysis-miri-0: anvil-pr-runtime-analysis-miri-0-validate-prereqs \
+    (_anvil-miri-test "standard" "" "" "" "0")
+
+# Run shard one of the Miri PR package set.
+[group("anvil")]
+anvil-pr-runtime-analysis-miri-1: anvil-pr-runtime-analysis-miri-1-validate-prereqs \
+    (_anvil-miri-test "standard" "" "" "" "1")
 
 # Run the Careful slice used by hosted PR runtime-analysis jobs.
 [group("anvil")]

@@ -400,6 +400,40 @@ Assert-Equal 'anvil-fmt succeeds inside the container' 0 $firstRun.ExitCode
 Assert-That 'the run reported building the image' ($firstRun.StdErr -match 'building .*(inputs changed|first run)')
 Assert-That 'image is present afterwards' (Test-ImagePresent $reference)
 
+# The Miri runtime split reads the same downloaded affected-package set on
+# every hosted leg. Prove the ordinal partition is stable and lossless before
+# checking the generated toolchain contracts.
+$impactDir = Join-Path $repo 'target/anvil/impact'
+Write-Fixture (Join-Path $impactDir 'modified.packages') ''
+Write-Fixture (Join-Path $impactDir 'affected.packages') @'
+zeta@1.0.0
+alpha@1.0.0
+middle@1.0.0
+beta@1.0.0
+alpha@1.0.0
+'@
+Write-Fixture (Join-Path $impactDir 'required.packages') ''
+$partition0Path = 'target/anvil/miri-shard-0.packages'
+$partition1Path = 'target/anvil/miri-shard-1.packages'
+$partition0 = Invoke-Just -Repo $repo `
+    -Arguments @('anvil-container', 'just', '_anvil-miri-partition', '0', $partition0Path) `
+    -Environment @{ ANVIL_IMPACT = 'consume' }
+$partition1 = Invoke-Just -Repo $repo `
+    -Arguments @('anvil-container', 'just', '_anvil-miri-partition', '1', $partition1Path) `
+    -Environment @{ ANVIL_IMPACT = 'consume' }
+Assert-Equal 'Miri shard zero is materialized' 0 $partition0.ExitCode
+Assert-Equal 'Miri shard one is materialized' 0 $partition1.ExitCode
+$shard0 = @(Get-Content -LiteralPath (Join-Path $repo $partition0Path) | Where-Object { $_ })
+$shard1 = @(Get-Content -LiteralPath (Join-Path $repo $partition1Path) | Where-Object { $_ })
+Assert-Equal 'Miri shard zero uses the first ordinal half' `
+    '["alpha@1.0.0","middle@1.0.0"]' (ConvertTo-Json -InputObject $shard0 -Compress)
+Assert-Equal 'Miri shard one uses the second ordinal half' `
+    '["beta@1.0.0","zeta@1.0.0"]' (ConvertTo-Json -InputObject $shard1 -Compress)
+$combined = @($shard0 + $shard1 | Sort-Object -Unique)
+Assert-Equal 'Miri shards cover each affected package exactly once' `
+    '["alpha@1.0.0","beta@1.0.0","middle@1.0.0","zeta@1.0.0"]' `
+    (ConvertTo-Json -InputObject $combined -Compress)
+
 $checkoutCompiler = Invoke-Just -Repo $repo -Arguments @(
     'anvil-container', 'env', 'RUSTUP_AUTO_INSTALL=0', 'rustc', '--version'
 )

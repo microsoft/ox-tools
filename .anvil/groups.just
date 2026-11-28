@@ -58,10 +58,15 @@ anvil-pr-runtime-analysis: anvil-pr-runtime-analysis-validate-prereqs \
     anvil-careful \
     anvil-loom
 
-# Run the Miri slice used by hosted PR runtime-analysis jobs.
+# Run shard zero of the Miri PR package set.
 [group("anvil")]
-anvil-pr-runtime-analysis-miri: anvil-pr-runtime-analysis-miri-validate-prereqs \
-    anvil-miri
+anvil-pr-runtime-analysis-miri-0: anvil-pr-runtime-analysis-miri-0-validate-prereqs \
+    (_anvil-miri-test "standard" "" "" "" "0")
+
+# Run shard one of the Miri PR package set.
+[group("anvil")]
+anvil-pr-runtime-analysis-miri-1: anvil-pr-runtime-analysis-miri-1-validate-prereqs \
+    (_anvil-miri-test "standard" "" "" "" "1")
 
 # Run the Careful slice used by hosted PR runtime-analysis jobs.
 [group("anvil")]
@@ -94,21 +99,31 @@ anvil-scheduled-advisories: (_anvil-unscoped "scheduled-advisories")
 [group("anvil")]
 anvil-scheduled-runtime-analysis: (_anvil-unscoped "scheduled-runtime-analysis")
 
-# Run the standard scheduled Miri profile in an independent hosted job.
+# Run shard zero of the standard scheduled Miri profile.
 [group("anvil")]
-anvil-scheduled-runtime-analysis-miri: (_anvil-unscoped "scheduled-runtime-analysis-miri")
+anvil-scheduled-runtime-analysis-miri-0: (_anvil-unscoped "scheduled-runtime-analysis-miri-0")
 
-# Run the tree-borrows scheduled Miri profile in an independent hosted job.
+# Run shard one of the standard scheduled Miri profile.
 [group("anvil")]
-anvil-scheduled-runtime-analysis-miri-tree-borrows: (_anvil-unscoped "scheduled-runtime-analysis-miri-tree-borrows")
+anvil-scheduled-runtime-analysis-miri-1: (_anvil-unscoped "scheduled-runtime-analysis-miri-1")
 
-# Run the strict-provenance scheduled Miri profile in an independent hosted job.
+# Run both shards of the scheduled tree-borrows Miri profile.
 [group("anvil")]
-anvil-scheduled-runtime-analysis-miri-strict-provenance: (_anvil-unscoped "scheduled-runtime-analysis-miri-strict-provenance")
+anvil-scheduled-runtime-analysis-miri-tree-borrows-0: (_anvil-unscoped "scheduled-runtime-analysis-miri-tree-borrows-0")
+[group("anvil")]
+anvil-scheduled-runtime-analysis-miri-tree-borrows-1: (_anvil-unscoped "scheduled-runtime-analysis-miri-tree-borrows-1")
 
-# Run the race-coverage scheduled Miri profile in an independent hosted job.
+# Run both shards of the scheduled strict-provenance Miri profile.
 [group("anvil")]
-anvil-scheduled-runtime-analysis-miri-race-coverage: (_anvil-unscoped "scheduled-runtime-analysis-miri-race-coverage")
+anvil-scheduled-runtime-analysis-miri-strict-provenance-0: (_anvil-unscoped "scheduled-runtime-analysis-miri-strict-provenance-0")
+[group("anvil")]
+anvil-scheduled-runtime-analysis-miri-strict-provenance-1: (_anvil-unscoped "scheduled-runtime-analysis-miri-strict-provenance-1")
+
+# Run both shards of the scheduled race-coverage Miri profile.
+[group("anvil")]
+anvil-scheduled-runtime-analysis-miri-race-coverage-0: (_anvil-unscoped "scheduled-runtime-analysis-miri-race-coverage-0")
+[group("anvil")]
+anvil-scheduled-runtime-analysis-miri-race-coverage-1: (_anvil-unscoped "scheduled-runtime-analysis-miri-race-coverage-1")
 
 # Run full mutation, feature-combination, and benchmark checks.
 [group("anvil")]
