@@ -6,6 +6,7 @@
 
 - 🐛 Bug Fixes
 
+  - cargo-anvil: isolate runtime shard statuses
   - cargo-anvil: shard Miri package jobs
   - cargo-anvil: shard runtime analysis jobs
   - cargo-anvil: disable Codecov report discovery
@@ -21,6 +22,7 @@
 
 - ✔️ Tasks
 
+  - cargo-anvil: refresh Miri shard release note
   - cargo-anvil: refresh runtime sharding release note
   - cargo-anvil: refresh Codecov upload release note
   - cargo-anvil: release v0.29.2 with coverage gate v0.7.7

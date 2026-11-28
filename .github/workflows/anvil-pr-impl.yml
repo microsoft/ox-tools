@@ -266,7 +266,7 @@ jobs:
         run: Get-PSDrive -PSProvider FileSystem | Format-Table -AutoSize
 
   pr-runtime-analysis:
-    name: "Check Group: Runtime Analysis (${{ matrix.os }}, ${{ matrix.check }})"
+    name: "Check Group: Runtime Analysis (${{ matrix.os }}, ${{ matrix.check }}, shard ${{ matrix.shard }})"
     permissions:
       contents: read
       statuses: write
@@ -281,7 +281,13 @@ jobs:
       fail-fast: false
       matrix:
         os: [linux, windows, linux-arm, windows-arm]
-        check: [miri-0, miri-1, careful, loom]
+        check: [miri, careful, loom]
+        shard: [0, 1]
+        exclude:
+          - check: careful
+            shard: 1
+          - check: loom
+            shard: 1
     runs-on: ${{ matrix.os == 'linux' && inputs.linux_runner
       || matrix.os == 'windows' && inputs.windows_runner
       || matrix.os == 'linux-arm' && inputs.linux_arm_runner
@@ -300,8 +306,11 @@ jobs:
       - uses: ./.anvil/github/actions/run-group
         with:
           group: pr-runtime-analysis-${{ matrix.check }}
+          status_identity: pr-runtime-analysis-${{ matrix.check }}-${{ matrix.shard }}
           publish_commit_statuses: ${{ inputs.publish_commit_statuses }}
           impact_mode: consume
+        env:
+          ANVIL_MIRI_PACKAGE_SHARD: ${{ matrix.shard }}
 
       - name: Report disk usage
         if: always()

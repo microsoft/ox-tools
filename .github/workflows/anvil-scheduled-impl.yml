@@ -107,7 +107,7 @@ jobs:
         run: Get-PSDrive -PSProvider FileSystem | Format-Table -AutoSize
 
   scheduled-runtime-analysis:
-    name: "Scheduled Runtime Analysis (${{ matrix.os }}, ${{ matrix.profile }})"
+    name: "Scheduled Runtime Analysis (${{ matrix.os }}, ${{ matrix.profile }}, shard ${{ matrix.shard }})"
     # Each Miri profile gets an independent OS matrix leg. The scheduled
     # runtime family remains one aggregate matrix dependency for failure fan-in.
     strategy:
@@ -115,14 +115,11 @@ jobs:
       matrix:
         os: [linux, windows, linux-arm, windows-arm]
         profile:
-          - miri-0
-          - miri-1
-          - miri-tree-borrows-0
-          - miri-tree-borrows-1
-          - miri-strict-provenance-0
-          - miri-strict-provenance-1
-          - miri-race-coverage-0
-          - miri-race-coverage-1
+          - miri
+          - miri-tree-borrows
+          - miri-strict-provenance
+          - miri-race-coverage
+        shard: [0, 1]
     runs-on: ${{ matrix.os == 'linux' && inputs.linux_runner
       || matrix.os == 'windows' && inputs.windows_runner
       || matrix.os == 'linux-arm' && inputs.linux_arm_runner
@@ -134,6 +131,9 @@ jobs:
       - uses: ./.anvil/github/actions/run-group
         with:
           group: scheduled-runtime-analysis-${{ matrix.profile }}
+          status_identity: scheduled-runtime-analysis-${{ matrix.profile }}-${{ matrix.shard }}
+        env:
+          ANVIL_MIRI_PACKAGE_SHARD: ${{ matrix.shard }}
 
       - name: Report disk usage
         if: always()
