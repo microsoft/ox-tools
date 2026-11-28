@@ -8,6 +8,7 @@
 
 use std::collections::BTreeSet;
 use std::path::Path;
+use std::process::Command;
 
 use cargo_anvil::Catalog;
 use cargo_anvil::test_support::{Cli, run_update};
@@ -239,25 +240,24 @@ fn codecov_uploads_the_canonical_merged_report_only() {
 #[test]
 fn runtime_analysis_workflows_shard_long_checks_without_changing_family_fan_in() {
     let pr = include_str!("../templates/github/pr-impl-workflow.yml");
-    assert!(pr.contains("check: [miri-0, miri-1, careful, loom]"));
+    assert!(pr.contains("check: [miri, careful, loom]"));
+    assert!(pr.contains("shard: [0, 1]"));
+    assert!(pr.contains("          - check: careful\n            shard: 1"));
+    assert!(pr.contains("          - check: loom\n            shard: 1"));
     assert!(pr.contains("group: pr-runtime-analysis-${{ matrix.check }}"));
+    assert!(pr.contains("status_identity: pr-runtime-analysis-${{ matrix.check }}-${{ matrix.shard }}"));
+    assert!(pr.contains("ANVIL_MIRI_PACKAGE_SHARD: ${{ matrix.shard }}"));
     assert!(pr.contains("      - pr-runtime-analysis\n"));
     assert!(pr.contains("PR_RUNTIME_ANALYSIS: ${{ needs.pr-runtime-analysis.result }}"));
 
     let scheduled = include_str!("../templates/github/scheduled-impl-workflow.yml");
-    for profile in [
-        "miri-0",
-        "miri-1",
-        "miri-tree-borrows-0",
-        "miri-tree-borrows-1",
-        "miri-strict-provenance-0",
-        "miri-strict-provenance-1",
-        "miri-race-coverage-0",
-        "miri-race-coverage-1",
-    ] {
+    for profile in ["miri", "miri-tree-borrows", "miri-strict-provenance", "miri-race-coverage"] {
         assert!(scheduled.contains(&format!("          - {profile}\n")));
     }
+    assert!(scheduled.contains("        shard: [0, 1]"));
     assert!(scheduled.contains("group: scheduled-runtime-analysis-${{ matrix.profile }}"));
+    assert!(scheduled.contains("status_identity: scheduled-runtime-analysis-${{ matrix.profile }}-${{ matrix.shard }}"));
+    assert!(scheduled.contains("ANVIL_MIRI_PACKAGE_SHARD: ${{ matrix.shard }}"));
     assert!(scheduled.contains("      - scheduled-runtime-analysis\n"));
 
     let generated = generated();
@@ -273,43 +273,101 @@ fn runtime_analysis_workflows_shard_long_checks_without_changing_family_fan_in()
             .contains("[System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::Ordinal)")
     );
     for recipe in [
-        "anvil-pr-runtime-analysis-miri-0",
-        "anvil-pr-runtime-analysis-miri-1",
+        "anvil-pr-runtime-analysis-miri",
         "anvil-pr-runtime-analysis-careful",
         "anvil-pr-runtime-analysis-loom",
-        "anvil-scheduled-runtime-analysis-miri-0",
-        "anvil-scheduled-runtime-analysis-miri-1",
-        "anvil-scheduled-runtime-analysis-miri-tree-borrows-0",
-        "anvil-scheduled-runtime-analysis-miri-tree-borrows-1",
-        "anvil-scheduled-runtime-analysis-miri-strict-provenance-0",
-        "anvil-scheduled-runtime-analysis-miri-strict-provenance-1",
-        "anvil-scheduled-runtime-analysis-miri-race-coverage-0",
-        "anvil-scheduled-runtime-analysis-miri-race-coverage-1",
+        "anvil-scheduled-runtime-analysis-miri",
+        "anvil-scheduled-runtime-analysis-miri-tree-borrows",
+        "anvil-scheduled-runtime-analysis-miri-strict-provenance",
+        "anvil-scheduled-runtime-analysis-miri-race-coverage",
     ] {
         assert!(
             generated.groups.lines().any(|line| line.starts_with(&format!("{recipe}:"))),
-            "missing sharded runtime-analysis recipe: {recipe}"
+            "missing runtime-analysis recipe: {recipe}"
         );
     }
     for setup in [
-        "anvil-pr-runtime-analysis-miri-0-setup",
-        "anvil-pr-runtime-analysis-miri-1-setup",
+        "anvil-pr-runtime-analysis-miri-setup",
         "anvil-pr-runtime-analysis-careful-setup",
         "anvil-pr-runtime-analysis-loom-setup",
-        "anvil-scheduled-runtime-analysis-miri-0-setup",
-        "anvil-scheduled-runtime-analysis-miri-1-setup",
-        "anvil-scheduled-runtime-analysis-miri-tree-borrows-0-setup",
-        "anvil-scheduled-runtime-analysis-miri-tree-borrows-1-setup",
-        "anvil-scheduled-runtime-analysis-miri-strict-provenance-0-setup",
-        "anvil-scheduled-runtime-analysis-miri-strict-provenance-1-setup",
-        "anvil-scheduled-runtime-analysis-miri-race-coverage-0-setup",
-        "anvil-scheduled-runtime-analysis-miri-race-coverage-1-setup",
+        "anvil-scheduled-runtime-analysis-miri-setup",
+        "anvil-scheduled-runtime-analysis-miri-tree-borrows-setup",
+        "anvil-scheduled-runtime-analysis-miri-strict-provenance-setup",
+        "anvil-scheduled-runtime-analysis-miri-race-coverage-setup",
     ] {
         assert!(
             generated.setup.lines().any(|line| line.starts_with(&format!("{setup} "))),
-            "missing sharded runtime-analysis setup: {setup}"
+            "missing runtime-analysis setup: {setup}"
         );
     }
+}
+
+#[test]
+fn miri_package_shards_cover_each_affected_package_once() {
+    let generated = generated();
+    let root = generated.temp.path();
+    let package_file = root.join("target/anvil/impact/affected.packages");
+    write(
+        &package_file,
+        "delta@0.1.0\nalpha@0.1.0\ncharlie@0.1.0\nbravo@0.1.0\nalpha@0.1.0\necho@0.1.0\n",
+    );
+    write(&root.join("target/anvil/impact/modified.packages"), "");
+    write(&root.join("target/anvil/impact/required.packages"), "");
+    write(
+        &root.join("Justfile"),
+        &format!(
+            "{}\n\npartition shard output: (_anvil-miri-partition shard output \"\")\n",
+            std::fs::read_to_string(root.join("Justfile")).unwrap()
+        ),
+    );
+
+    for shard in ["0", "1"] {
+        let output = Command::new("just")
+            .args(["partition", shard, &format!("target/shard-{shard}.packages")])
+            .current_dir(root)
+            .env("ANVIL_IMPACT", "consume")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "Miri partition {shard} failed:\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    let read_shard = |shard: &str| {
+        std::fs::read_to_string(root.join(format!("target/shard-{shard}.packages")))
+            .unwrap()
+            .lines()
+            .filter(|line| !line.is_empty())
+            .map(str::to_owned)
+            .collect::<BTreeSet<_>>()
+    };
+    let shard_zero = read_shard("0");
+    let shard_one = read_shard("1");
+    let expected = BTreeSet::from([
+        "alpha@0.1.0".to_owned(),
+        "bravo@0.1.0".to_owned(),
+        "charlie@0.1.0".to_owned(),
+        "delta@0.1.0".to_owned(),
+        "echo@0.1.0".to_owned(),
+    ]);
+
+    assert!(shard_zero.is_disjoint(&shard_one));
+    assert_eq!(shard_zero.union(&shard_one).cloned().collect::<BTreeSet<_>>(), expected);
+}
+
+#[test]
+fn runtime_actions_forward_an_independent_status_identity() {
+    let run_group = include_str!("../templates/github/run-group-action.yml");
+    assert!(run_group.contains("  status_identity:"));
+    assert!(run_group.contains("status_identity: ${{ inputs.status_identity }}"));
+
+    let report_status = include_str!("../templates/github/report-status-action.yml");
+    assert!(report_status.contains("  status_identity:"));
+    assert!(report_status.contains("ANVIL_STATUS_IDENTITY: ${{ inputs.status_identity }}"));
+    assert!(report_status.contains("const statusIdentity = process.env.ANVIL_STATUS_IDENTITY || group;"));
 }
 
 #[test]

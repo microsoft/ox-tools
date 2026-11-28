@@ -57,7 +57,9 @@ from an ordinal-sorted, deduplicated affected-package set, alternating between
 shards, so every package runs exactly once for each profile. Every leg remains
 inside the same `pr-runtime-analysis` or `scheduled-runtime-analysis` matrix
 family, so the existing required aggregate still observes every check. Local
-aggregate recipes retain their sequential composition.
+aggregate recipes retain their sequential composition. Shards remain the same
+base setup and execution group; the workflow exports the shard for package
+selection and gives supplemental commit statuses a distinct identity.
 
 The GitHub backend also emits a code-review skill and linked test-review rules
 under `.github/skills/code-review/`. These are agent guidance, not CI jobs.
@@ -164,7 +166,9 @@ Anvil / license-headers [pr-fast] (linux-x64)
 These statuses target the PR head SHA and link to the workflow run. Setup
 failures report `error`; recipe failures report `failure`. Clean runs add no
 new status, but supersede earlier failures for the same group and runner with
-`success`. A rerun leaves the prior failure visible until its result is known.
+`success`. Parallel shards of one group use distinct identities, so a clean
+shard cannot supersede another shard's failure on the same runner. A rerun
+leaves the prior failure visible until its result is known.
 
 GitHub cannot delete commit statuses: superseded rows and their context names
 remain repository metadata. **Do not require supplemental status contexts.**

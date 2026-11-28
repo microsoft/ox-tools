@@ -12,33 +12,17 @@ _anvil-scheduled-runtime-analysis: anvil-scheduled-runtime-analysis-validate-pre
     anvil-miri-race-coverage
 
 [private]
-_anvil-scheduled-runtime-analysis-miri-0: anvil-scheduled-runtime-analysis-miri-0-validate-prereqs \
-    (_anvil-miri-test "standard" "" "" "" "0")
+_anvil-scheduled-runtime-analysis-miri: anvil-scheduled-runtime-analysis-miri-validate-prereqs \
+    anvil-miri
 
 [private]
-_anvil-scheduled-runtime-analysis-miri-1: anvil-scheduled-runtime-analysis-miri-1-validate-prereqs \
-    (_anvil-miri-test "standard" "" "" "" "1")
+_anvil-scheduled-runtime-analysis-miri-tree-borrows: anvil-scheduled-runtime-analysis-miri-tree-borrows-validate-prereqs \
+    anvil-miri-tree-borrows
 
 [private]
-_anvil-scheduled-runtime-analysis-miri-tree-borrows-0: anvil-scheduled-runtime-analysis-miri-tree-borrows-0-validate-prereqs \
-    (_anvil-miri-test "tree-borrows" "" "" "" "0")
+_anvil-scheduled-runtime-analysis-miri-strict-provenance: anvil-scheduled-runtime-analysis-miri-strict-provenance-validate-prereqs \
+    anvil-miri-strict-provenance
 
 [private]
-_anvil-scheduled-runtime-analysis-miri-tree-borrows-1: anvil-scheduled-runtime-analysis-miri-tree-borrows-1-validate-prereqs \
-    (_anvil-miri-test "tree-borrows" "" "" "" "1")
-
-[private]
-_anvil-scheduled-runtime-analysis-miri-strict-provenance-0: anvil-scheduled-runtime-analysis-miri-strict-provenance-0-validate-prereqs \
-    (_anvil-miri-test "strict-provenance" "" "" "" "0")
-
-[private]
-_anvil-scheduled-runtime-analysis-miri-strict-provenance-1: anvil-scheduled-runtime-analysis-miri-strict-provenance-1-validate-prereqs \
-    (_anvil-miri-test "strict-provenance" "" "" "" "1")
-
-[private]
-_anvil-scheduled-runtime-analysis-miri-race-coverage-0: anvil-scheduled-runtime-analysis-miri-race-coverage-0-validate-prereqs \
-    (_anvil-miri-test "race-coverage" "" "" "" "0")
-
-[private]
-_anvil-scheduled-runtime-analysis-miri-race-coverage-1: anvil-scheduled-runtime-analysis-miri-race-coverage-1-validate-prereqs \
-    (_anvil-miri-test "race-coverage" "" "" "" "1")
+_anvil-scheduled-runtime-analysis-miri-race-coverage: anvil-scheduled-runtime-analysis-miri-race-coverage-validate-prereqs \
+    anvil-miri-race-coverage

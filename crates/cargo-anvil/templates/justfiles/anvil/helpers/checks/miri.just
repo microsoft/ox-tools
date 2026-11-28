@@ -25,10 +25,11 @@ anvil_miri_package_file(shard, output) := if output != "" {
 } else {
     "target" / "anvil" / ("miri-packages-" + just_pid() + "-" + shard + ".packages")
 }
+anvil_miri_effective_shard(shard) := if shard != "" { shard } else { env("ANVIL_MIRI_PACKAGE_SHARD", "") }
 anvil_miri_selection(package, shard, output) := if package != "" {
     "--package " + quote(package)
-} else if shard != "" {
-    "--package-file " + quote(anvil_miri_package_file(shard, output))
+} else if anvil_miri_effective_shard(shard) != "" {
+    "--package-file " + quote(anvil_miri_package_file(anvil_miri_effective_shard(shard), output))
 } else {
     anvil_affected_selection
 }
@@ -47,12 +48,12 @@ anvil_cargo_env_config(name, value) := "--config " + quote("env." + name + ".val
 [env(anvil_miri_library_path_name, anvil_miri_library_path)]
 [env("__CARGO_TEMPORARY_BUILD_DIR_NEW_LAYOUT_OPT_OUT", anvil_miri_build_dir_layout_opt_out)]
 [private]
-_anvil-miri-test profile package="" test_filter="" example="" shard="": (_anvil-miri-partition shard "" package) _ensure-target-dir
+_anvil-miri-test profile package="" test_filter="" example="" shard="": (_anvil-miri-partition anvil_miri_effective_shard(shard) "" package) _ensure-target-dir
     {{ if profile == "standard" || profile == "tree-borrows" || profile == "strict-provenance" || profile == "race-coverage" { "# valid Miri profile" } else { error("anvil miri: unknown profile '" + profile + "'") } }}
     {{ if test_filter != "" && example != "" { error("anvil-miri: choose exactly one of --test or --example") } else { "# valid test/example selection" } }}
     {{ if example != "" && package == "" { error("anvil-miri: --example requires --package to avoid workspace ambiguity") } else { "# valid example package selection" } }}
-    {{ if example == "" { "# " } else { "" } }}cargo +{{ rust_nightly }} {{ anvil_cargo_env_config("MIRIFLAGS", anvil_miri_flags(profile)) }} {{ anvil_cargo_env_config("RUSTFLAGS", anvil_miri_rustflags(profile)) }} each {{ anvil_miri_selection(package, shard, "") }} --filter {{ quote("not metadata:anvil.miri.exclude=true") }} --once -- cargo +{{ rust_nightly }} miri run '{packages}' --all-features --locked --example {{ quote(example) }}
-    {{ if example != "" { "# " } else { "" } }}cargo +{{ rust_nightly }} {{ anvil_cargo_env_config("MIRIFLAGS", anvil_miri_flags(profile)) }} {{ anvil_cargo_env_config("RUSTFLAGS", anvil_miri_rustflags(profile)) }} each {{ anvil_miri_selection(package, shard, "") }} --filter {{ quote("not metadata:anvil.miri.exclude=true") }} --once -- cargo +{{ rust_nightly }} miri test '{packages}' --all-features --tests --no-run --locked --message-format=json,json-render-diagnostics > {{ quote(anvil_miri_artifacts_file) }}
+    {{ if example == "" { "# " } else { "" } }}cargo +{{ rust_nightly }} {{ anvil_cargo_env_config("MIRIFLAGS", anvil_miri_flags(profile)) }} {{ anvil_cargo_env_config("RUSTFLAGS", anvil_miri_rustflags(profile)) }} each {{ anvil_miri_selection(package, anvil_miri_effective_shard(shard), "") }} --filter {{ quote("not metadata:anvil.miri.exclude=true") }} --once -- cargo +{{ rust_nightly }} miri run '{packages}' --all-features --locked --example {{ quote(example) }}
+    {{ if example != "" { "# " } else { "" } }}cargo +{{ rust_nightly }} {{ anvil_cargo_env_config("MIRIFLAGS", anvil_miri_flags(profile)) }} {{ anvil_cargo_env_config("RUSTFLAGS", anvil_miri_rustflags(profile)) }} each {{ anvil_miri_selection(package, anvil_miri_effective_shard(shard), "") }} --filter {{ quote("not metadata:anvil.miri.exclude=true") }} --once -- cargo +{{ rust_nightly }} miri test '{packages}' --all-features --tests --no-run --locked --message-format=json,json-render-diagnostics > {{ quote(anvil_miri_artifacts_file) }}
     {{ if example != "" { "# " } else { "" } }}cargo +{{ rust_nightly }} {{ anvil_cargo_env_config("MIRIFLAGS", anvil_miri_flags(profile)) }} each --json-lines-file {{ quote(anvil_miri_artifacts_file) }} --json-filter {{ quote("reason=compiler-artifact and profile.test=true and executable") }} --json-work-dir-parent manifest_path --jobs {{ quote(env("ANVIL_MIRI_JOBS", "auto")) }} --keep-going -- rustup run {{ rust_nightly }} cargo-miri runner '{json:executable}' {{ if test_filter == "" { "" } else { quote(test_filter) } }}
     {{ if example != "" { "# " } else { "" } }}rm {{ quote(anvil_miri_artifacts_file) }}
 

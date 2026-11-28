@@ -21,22 +21,12 @@ anvil-pr-runtime-analysis-validate-prereqs: \
     anvil-loom-validate-prereqs
 
 [private]
-anvil-pr-runtime-analysis-miri-0-setup installer="install": \
+anvil-pr-runtime-analysis-miri-setup installer="install": \
     (anvil-tool-cargo-delta-install installer) \
     (anvil-miri-setup installer)
 
 [private]
-anvil-pr-runtime-analysis-miri-0-validate-prereqs: \
-    anvil-tool-cargo-delta-validate-prereqs \
-    anvil-miri-validate-prereqs
-
-[private]
-anvil-pr-runtime-analysis-miri-1-setup installer="install": \
-    (anvil-tool-cargo-delta-install installer) \
-    (anvil-miri-setup installer)
-
-[private]
-anvil-pr-runtime-analysis-miri-1-validate-prereqs: \
+anvil-pr-runtime-analysis-miri-validate-prereqs: \
     anvil-tool-cargo-delta-validate-prereqs \
     anvil-miri-validate-prereqs
 
