@@ -55,9 +55,9 @@ impl Candidates {
 
 /// Validates release candidates by packaging and testing their archives.
 ///
-/// The invoker owns the scratch directory for this call and is consumed after
-/// the check completes. An empty candidate set succeeds without launching
-/// Cargo, although callers can avoid preparing an invoker for that case.
+/// The check consumes `cargo` and uses its scratch directory. An empty
+/// candidate set succeeds without launching Cargo; callers can skip preparing
+/// `cargo` in that case.
 ///
 /// # Errors
 ///
@@ -143,9 +143,8 @@ fn patch_config(sources: &BTreeMap<String, PathBuf>) -> Result<DocumentMut> {
 
 /// Configures Cargo commands for one release-dependency check.
 ///
-/// The invoker owns the check's scratch directory. It can be passed to
-/// [`check`] once; moving it into that call prevents a scratch directory from
-/// being reused by another check.
+/// Each instance owns a scratch directory and can be passed to [`check`]
+/// only once. This prevents another check from reusing that directory.
 #[derive(Debug)]
 pub struct CargoInvoker {
     root: PathBuf,
