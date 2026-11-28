@@ -5,5 +5,5 @@
 # Regenerate with cargo-anvil to update this file.
 
 # Verify Cargo manifests are sorted and formatted consistently.
-anvil-cargo-sort: anvil-cargo-sort-validate-prereqs anvil-impact
-    cargo each {{ anvil_modified_selection }} --once -- cargo {{ anvil_stable_toolchain_arg }} sort --workspace --grouped --check --check-format
+anvil-cargo-sort: anvil-cargo-sort-validate-prereqs
+    cargo each --workspace --once -- cargo {{ anvil_stable_toolchain_arg }} sort --workspace --grouped --check --check-format
