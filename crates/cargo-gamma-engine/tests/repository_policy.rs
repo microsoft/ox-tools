@@ -12,6 +12,7 @@ use walkdir::WalkDir;
 
 /// Calibrate the production nesting guard against the real workspace sources.
 #[test]
+#[cfg_attr(miri, ignore = "walks the live workspace, which requires filesystem access outside Miri isolation")]
 fn this_workspace_is_within_the_limit() {
     // Gamma's instrumented scratch sources intentionally contain deeper guard expressions.
     if env::var_os("CARGO_GAMMA").is_some() {
