@@ -2,6 +2,39 @@
 
 ## [Unreleased]
 
+## [0.30.0] - 2026-11-27
+
+- ✨ Features
+
+  - cargo-anvil: isolate authenticated dependency preparation
+
+- 🐛 Bug Fixes
+
+  - cargo-anvil: recognize prebundled binary installer
+  - cargo-anvil: enable list settings in image bootstrap
+  - cargo-anvil: use documented list-to-string conversion
+  - cargo-anvil: join list-valued container arguments
+  - cargo-anvil: reject preparation engine selector overrides
+  - cargo-anvil: inspect regular hard-linked cache files
+  - cargo-anvil: select preparation tools outside workspace overrides
+  - cargo-anvil: inspect preparation output incrementally
+  - cargo-anvil: bound preparation cache inspection memory
+
+- ✔️ Tasks
+
+  - cargo-anvil: regenerate bootstrap setting artifacts
+  - cargo-anvil: regenerate list conversion artifacts
+  - cargo-anvil: regenerate list argument artifacts
+  - cargo-anvil: reconcile consolidated main catalog
+  - cargo-anvil: reconcile main release metadata
+  - cargo-anvil: regenerate reserved engine-control artifacts
+  - cargo-anvil: regenerate regular hard-link inspection artifacts
+  - cargo-anvil: regenerate image tool provenance artifacts
+  - cargo-anvil: regenerate incremental capture artifacts
+  - cargo-anvil: regenerate bounded preparation artifacts
+  - cargo-anvil: reconcile main release metadata
+  - cargo-anvil: regenerate the optional preparation catalog
+
 ## [0.29.1] - 2026-11-27
 
 - ✨ Features
