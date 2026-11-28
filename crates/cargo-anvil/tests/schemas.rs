@@ -74,6 +74,51 @@ fn try_run(cmd: &mut Command) -> Option<Output> {
     }
 }
 
+fn prepend_path(command: &mut Command, directory: &Path) {
+    let paths = std::iter::once(directory.to_path_buf()).chain(
+        std::env::var_os("PATH")
+            .into_iter()
+            .flat_map(|path| std::env::split_paths(&path).collect::<Vec<_>>()),
+    );
+    command.env("PATH", std::env::join_paths(paths).unwrap());
+}
+
+fn write_fake_cargo_tools(directory: &Path) {
+    std::fs::create_dir_all(directory).unwrap();
+
+    #[cfg(windows)]
+    {
+        write(
+            &directory.join("cargo.cmd"),
+            "@echo off\r\n\
+             if \"%1 %2\"==\"install --list\" exit /b 0\r\n\
+             if \"%1\"==\"binstall\" if defined ANVIL_TEST_TOOLCHAIN_FILE \
+             > \"%ANVIL_TEST_TOOLCHAIN_FILE%\" echo %RUSTUP_TOOLCHAIN%\r\n\
+             exit /b 0\r\n",
+        );
+        write(&directory.join("cargo-binstall.cmd"), "@echo off\r\nexit /b 0\r\n");
+    }
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+
+        write(
+            &directory.join("cargo"),
+            "#!/bin/sh\n\
+             if [ \"$1 $2\" = \"install --list\" ]; then exit 0; fi\n\
+             if [ \"$1\" = \"binstall\" ] && [ -n \"$ANVIL_TEST_TOOLCHAIN_FILE\" ]; then\n\
+               printf '%s\\n' \"$RUSTUP_TOOLCHAIN\" > \"$ANVIL_TEST_TOOLCHAIN_FILE\"\n\
+             fi\n\
+             exit 0\n",
+        );
+        write(&directory.join("cargo-binstall"), "#!/bin/sh\nexit 0\n");
+        for name in ["cargo", "cargo-binstall"] {
+            std::fs::set_permissions(directory.join(name), std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+    }
+}
+
 #[test]
 fn taplo_validates_emitted_toml_files() {
     let tmp = run_with_backend("github");
@@ -98,6 +143,109 @@ fn taplo_validates_emitted_toml_files() {
         String::from_utf8_lossy(&out.stdout),
         String::from_utf8_lossy(&out.stderr)
     );
+}
+
+#[test]
+fn handwritten_root_justfile_receives_the_required_unstable_setting() {
+    let tmp = empty_workspace();
+    write(&tmp.path().join("Justfile"), "# Existing repository recipes.\n");
+    run_update(
+        &cargo_anvil::Catalog::anvil(),
+        &Cli {
+            backends: vec![],
+            no_backends: true,
+            dry_run: false,
+            force: false,
+        },
+        tmp.path(),
+    )
+    .unwrap();
+
+    let mut cmd = Command::new("just");
+    cmd.args(["--justfile", "Justfile", "--list"]).current_dir(tmp.path());
+    let Some(out) = try_run(&mut cmd) else {
+        eprintln!("skipping: just not installed");
+        return;
+    };
+    assert!(
+        out.status.success(),
+        "generated imports must enable their required unstable features:\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+#[test]
+fn container_variadic_command_preserves_the_whitespace_contract() {
+    let tmp = run_with_backend("github");
+    let mut cmd = Command::new("just");
+    cmd.args(["--justfile", "Justfile", "anvil-container", "just", "--version"])
+        .current_dir(tmp.path())
+        .env("ANVIL_IN_CONTAINER", "1");
+    let Some(out) = try_run(&mut cmd) else {
+        eprintln!("skipping: just not installed");
+        return;
+    };
+    assert!(
+        out.status.success(),
+        "container command arguments must remain a whitespace-delimited string:\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+#[test]
+fn setup_recognizes_an_explicit_prebuilt_cargo_binstall() {
+    let tmp = run_with_backend("github");
+    let bin = tmp.path().join("fake-bin");
+    write_fake_cargo_tools(&bin);
+    let cargo_binstall = bin.join(if cfg!(windows) { "cargo-binstall.cmd" } else { "cargo-binstall" });
+
+    let mut cmd = Command::new("just");
+    cmd.args(["--justfile", "Justfile", "--evaluate", "cargo_binstall_found"])
+        .current_dir(tmp.path())
+        .env("ANVIL_CARGO_BINSTALL", cargo_binstall);
+    prepend_path(&mut cmd, &bin);
+    let Some(out) = try_run(&mut cmd) else {
+        eprintln!("skipping: just not installed");
+        return;
+    };
+    assert!(
+        out.status.success(),
+        "cargo-binstall detection failed:\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "true");
+}
+
+#[test]
+fn cargo_tool_install_uses_the_configured_toolchain() {
+    let tmp = run_with_backend("github");
+    let bin = tmp.path().join("fake-bin");
+    let observed = tmp.path().join("observed-toolchain");
+    write_fake_cargo_tools(&bin);
+    let cargo_binstall = bin.join(if cfg!(windows) { "cargo-binstall.cmd" } else { "cargo-binstall" });
+
+    let mut cmd = Command::new("just");
+    cmd.args(["--justfile", "Justfile", "_install-tool", "cargo-each", "0.8.0", "binstall"])
+        .current_dir(tmp.path())
+        .env("RUSTUP_TOOLCHAIN", "1.95")
+        .env("ANVIL_CARGO_BINSTALL", cargo_binstall)
+        .env("ANVIL_CARGO_INSTALL_TOOLCHAIN", "stable")
+        .env("ANVIL_TEST_TOOLCHAIN_FILE", &observed);
+    prepend_path(&mut cmd, &bin);
+    let Some(out) = try_run(&mut cmd) else {
+        eprintln!("skipping: just not installed");
+        return;
+    };
+    assert!(
+        out.status.success(),
+        "Cargo tool installation failed:\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(std::fs::read_to_string(observed).unwrap().trim(), "stable");
 }
 
 #[test]

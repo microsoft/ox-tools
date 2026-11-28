@@ -40,7 +40,7 @@ anvil_impact_skip_prefix := if anvil_impact_mode != "" {
 } else {
     ""
 }
-anvil_impact_config_arg := if path_exists(".delta.toml") { "--config " + quote(absolute_path(".delta.toml")) } else { "" }
+anvil_impact_config_arg := if path_exists(".delta.toml") == "true" { "--config " + quote(absolute_path(".delta.toml")) } else { "" }
 anvil_impact_toolchain := if anvil_impact_mode == "" {
     trim(shell("rustc " + anvil_stable_toolchain_arg + " --print sysroot"))
 } else {
@@ -89,9 +89,9 @@ workspace_rust_version_line := if anvil_root_msrv == "" {
 workspace_rust_version := replace(workspace_rust_version_line, "workspace-rust-version=", "")
 
 anvil_stable_toolchain_arg := if env("RUSTUP_TOOLCHAIN", "") == "" {
-    if path_exists(justfile_directory() + "/rust-toolchain.toml") {
+    if path_exists(justfile_directory() + "/rust-toolchain.toml") == "true" {
         ""
-    } else if path_exists(justfile_directory() + "/rust-toolchain") {
+    } else if path_exists(justfile_directory() + "/rust-toolchain") == "true" {
         ""
     } else if workspace_rust_version == "" {
         ""
@@ -108,4 +108,4 @@ anvil_msrv_workspace_selection := if workspace_rust_version == "" { "--none" } e
 # Validate downloaded inputs without invoking cargo-delta or recomputing impact.
 [private]
 _anvil-impact-consume-file tier file=(anvil_impact_input_dir + "/" + tier + ".packages"):
-    {{ if anvil_impact_mode != "consume" { "# no downloaded impact input required" } else if path_exists(file) { if read(file) == "" { "# empty impact selection: " + tier } else { "# downloaded impact selection: " + tier } } else { error("anvil-impact: ANVIL_IMPACT=consume requires " + file + "; download a complete impact artifact or correct ANVIL_IMPACT_INPUT_DIR") } }}
+    {{ if anvil_impact_mode != "consume" { "# no downloaded impact input required" } else if path_exists(file) == "true" { if read(file) == "" { "# empty impact selection: " + tier } else { "# downloaded impact selection: " + tier } } else { error("anvil-impact: ANVIL_IMPACT=consume requires " + file + "; download a complete impact artifact or correct ANVIL_IMPACT_INPUT_DIR") } }}

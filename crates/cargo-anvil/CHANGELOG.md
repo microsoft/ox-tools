@@ -2,6 +2,20 @@
 
 ## [Unreleased]
 
+## [0.29.2] - 2026-11-28
+
+- 🐛 Bug Fixes
+
+  - cargo-anvil: repair generated container setup
+
+- 📚 Documentation
+
+  - cargo-anvil: refresh 0.28.6 release notes
+
+- 🧩 Miscellaneous
+
+  - Merge origin/main into fix-anvil-container-bootstrap
+
 ## [0.29.1] - 2026-11-27
 
 - ✨ Features

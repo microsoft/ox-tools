@@ -99,7 +99,18 @@ GitHub setup uses `binstall`; ADO uses source installation.
 Cargo tools are installed at their exact catalog versions. Already-installed
 versions at or above the catalog minimum are accepted and are not downgraded.
 Pins are recorded in `.anvil/setup.just`. Bootstrap utilities such as cargo-binstall
-are not covered by the catalog's exact-version guarantee.
+are not covered by the catalog's exact-version guarantee. Setup recognizes
+cargo-binstall either from Cargo's install inventory or from an explicitly
+supplied prebuilt executable path. The generated container uses the latter for
+its pinned binary.
+
+Generated recipes do not enable Just's unstable list mode. Variadic container
+commands retain their whitespace-delimited string contract, so an existing root
+Justfile does not need to add the unstable setting manually: the managed import
+region supplies it only when the repository has not already declared it.
+Container images compile Cargo tools with current stable Rust, while repository
+components and checks continue to use the selected workspace toolchain. The
+MSRV group still installs and tests the declared minimum separately.
 
 ### System prerequisites
 

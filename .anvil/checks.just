@@ -9,7 +9,7 @@
 [env("RUSTUP_TOOLCHAIN", anvil_impact_toolchain)]
 [env("GIT_LFS_SKIP_SMUDGE", "1")]
 anvil-impact: (_check-tool "cargo-delta" cargo_delta_version if anvil_impact_mode == "" { "true" } else { "false" }) (_anvil-impact-consume-file "modified") (_anvil-impact-consume-file "affected") (_anvil-impact-consume-file "required")
-    @{{ anvil_impact_skip_prefix }}{{ if path_exists(".delta.toml") { "# repository impact configuration available" } else { "echo " + quote("anvil-impact: warning: no .delta.toml found; cargo-delta defaults may under-scope checks. Restore the repository's impact configuration for conservative scoping.") } }}
+    @{{ anvil_impact_skip_prefix }}{{ if path_exists(".delta.toml") == "true" { "# repository impact configuration available" } else { "echo " + quote("anvil-impact: warning: no .delta.toml found; cargo-delta defaults may under-scope checks. Restore the repository's impact configuration for conservative scoping.") } }}
     {{ anvil_impact_skip_prefix }}cargo delta {{ anvil_impact_config_arg }} impact --base-ref {{ quote(anvil_base_ref) }} --modified --format packages --output {{ quote(anvil_impact_input_dir + "/modified.packages") }}
     {{ anvil_impact_skip_prefix }}cargo delta {{ anvil_impact_config_arg }} impact --base-ref {{ quote(anvil_base_ref) }} --affected --format packages --output {{ quote(anvil_impact_input_dir + "/affected.packages") }}
     {{ anvil_impact_skip_prefix }}cargo delta {{ anvil_impact_config_arg }} impact --base-ref {{ quote(anvil_base_ref) }} --required --format packages --output {{ quote(anvil_impact_input_dir + "/required.packages") }}
@@ -34,7 +34,7 @@ anvil-bench: anvil-bench-validate-prereqs anvil-impact
 
 # Discover and fuzz affected Bolero targets.
 anvil-bolero campaign="pr": anvil-bolero-validate-prereqs _ensure-target-dir
-    {{ if campaign == "pr" || campaign == "scheduled" { "# valid campaign" } else { error("unknown Bolero campaign '" + campaign + "'; expected 'pr' or 'scheduled'") } }}
+    {{ if campaign == "pr" { "# valid campaign" } else if campaign == "scheduled" { "# valid campaign" } else { error("unknown Bolero campaign '" + campaign + "'; expected 'pr' or 'scheduled'") } }}
     {{ bolero_command_prefix }}cargo +{{ rust_nightly }} each {{ anvil_affected_selection }} -- cargo +{{ rust_nightly }} bolero list --profile release --target {{ quote(anvil_bolero_host_target) }} --package '{name}' > {{ quote(anvil_bolero_targets_file) }}
     {{ bolero_command_prefix }}cargo +{{ rust_nightly }} each --json-lines-file {{ quote(anvil_bolero_targets_file) }} --keep-going -- cargo +{{ rust_nightly }} bolero test --profile release --target {{ quote(anvil_bolero_host_target) }} --engine libfuzzer {{ if campaign == "pr" { "--runs 30000 -S 2027" } else { "-T 90s" } }} --package '{json:package}' '{json:test}'
     {{ bolero_command_prefix }}rm {{ quote(anvil_bolero_targets_file) }}
@@ -69,7 +69,7 @@ anvil_test_feature_policy := justfile_directory() + "/.anvil/deny-test-features.
 # Reject test-only features in dependencies and defaults of publishable packages.
 [group("anvil")]
 anvil-deny-test-features: anvil-deny-test-features-validate-prereqs
-    cargo ensure-no-test-features --manifest-path {{ quote(justfile_directory() + "/Cargo.toml") }} {{ if path_exists(anvil_test_feature_policy) { "--policy " + quote(anvil_test_feature_policy) } else { "" } }}
+    cargo ensure-no-test-features --manifest-path {{ quote(justfile_directory() + "/Cargo.toml") }} {{ if path_exists(anvil_test_feature_policy) == "true" { "--policy " + quote(anvil_test_feature_policy) } else { "" } }}
 
 # Build required-package documentation with rustdoc warnings denied.
 [arg("open", long, value="true")]

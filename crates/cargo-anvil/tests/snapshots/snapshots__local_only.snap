@@ -34,7 +34,7 @@ alias anvil := anvil-pr
 [env("RUSTUP_TOOLCHAIN", anvil_impact_toolchain)]
 [env("GIT_LFS_SKIP_SMUDGE", "1")]
 anvil-impact: (_check-tool "cargo-delta" cargo_delta_version if anvil_impact_mode == "" { "true" } else { "false" }) (_anvil-impact-consume-file "modified") (_anvil-impact-consume-file "affected") (_anvil-impact-consume-file "required")
-    @{{ anvil_impact_skip_prefix }}{{ if path_exists(".delta.toml") { "# repository impact configuration available" } else { "echo " + quote("anvil-impact: warning: no .delta.toml found; cargo-delta defaults may under-scope checks. Restore the repository's impact configuration for conservative scoping.") } }}
+    @{{ anvil_impact_skip_prefix }}{{ if path_exists(".delta.toml") == "true" { "# repository impact configuration available" } else { "echo " + quote("anvil-impact: warning: no .delta.toml found; cargo-delta defaults may under-scope checks. Restore the repository's impact configuration for conservative scoping.") } }}
     {{ anvil_impact_skip_prefix }}cargo delta {{ anvil_impact_config_arg }} impact --base-ref {{ quote(anvil_base_ref) }} --modified --format packages --output {{ quote(anvil_impact_input_dir + "/modified.packages") }}
     {{ anvil_impact_skip_prefix }}cargo delta {{ anvil_impact_config_arg }} impact --base-ref {{ quote(anvil_base_ref) }} --affected --format packages --output {{ quote(anvil_impact_input_dir + "/affected.packages") }}
     {{ anvil_impact_skip_prefix }}cargo delta {{ anvil_impact_config_arg }} impact --base-ref {{ quote(anvil_base_ref) }} --required --format packages --output {{ quote(anvil_impact_input_dir + "/required.packages") }}
@@ -59,7 +59,7 @@ anvil-bench: anvil-bench-validate-prereqs anvil-impact
 
 # Discover and fuzz affected Bolero targets.
 anvil-bolero campaign="pr": anvil-bolero-validate-prereqs _ensure-target-dir
-    {{ if campaign == "pr" || campaign == "scheduled" { "# valid campaign" } else { error("unknown Bolero campaign '" + campaign + "'; expected 'pr' or 'scheduled'") } }}
+    {{ if campaign == "pr" { "# valid campaign" } else if campaign == "scheduled" { "# valid campaign" } else { error("unknown Bolero campaign '" + campaign + "'; expected 'pr' or 'scheduled'") } }}
     {{ bolero_command_prefix }}cargo +{{ rust_nightly }} each {{ anvil_affected_selection }} -- cargo +{{ rust_nightly }} bolero list --profile release --target {{ quote(anvil_bolero_host_target) }} --package '{name}' > {{ quote(anvil_bolero_targets_file) }}
     {{ bolero_command_prefix }}cargo +{{ rust_nightly }} each --json-lines-file {{ quote(anvil_bolero_targets_file) }} --keep-going -- cargo +{{ rust_nightly }} bolero test --profile release --target {{ quote(anvil_bolero_host_target) }} --engine libfuzzer {{ if campaign == "pr" { "--runs 30000 -S 2027" } else { "-T 90s" } }} --package '{json:package}' '{json:test}'
     {{ bolero_command_prefix }}rm {{ quote(anvil_bolero_targets_file) }}
@@ -94,7 +94,7 @@ anvil_test_feature_policy := justfile_directory() + "/.anvil/deny-test-features.
 # Reject test-only features in dependencies and defaults of publishable packages.
 [group("anvil")]
 anvil-deny-test-features: anvil-deny-test-features-validate-prereqs
-    cargo ensure-no-test-features --manifest-path {{ quote(justfile_directory() + "/Cargo.toml") }} {{ if path_exists(anvil_test_feature_policy) { "--policy " + quote(anvil_test_feature_policy) } else { "" } }}
+    cargo ensure-no-test-features --manifest-path {{ quote(justfile_directory() + "/Cargo.toml") }} {{ if path_exists(anvil_test_feature_policy) == "true" { "--policy " + quote(anvil_test_feature_policy) } else { "" } }}
 
 # Build required-package documentation with rustdoc warnings denied.
 [arg("open", long, value="true")]
@@ -257,7 +257,7 @@ ENV DEBIAN_FRONTEND=noninteractive \
 # step fails without build-essential.
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
-        build-essential ca-certificates clang libclang-dev curl git libicu-dev \
+        build-essential ca-certificates clang libclang-dev curl git git-lfs libicu-dev \
         libssl-dev pkg-config tar \
     && rm -rf /var/lib/apt/lists/*
 
@@ -318,17 +318,17 @@ RUN curl -fsSLo /tmp/cargo-binstall.tgz \
 # volume over each, and an engine seeds a new volume from the image path it
 # covers; a path that does not exist seeds as root-owned 0755, which the
 # `--user` mapping cannot write, so the first cargo fetch fails with EACCES.
-# The driver passes the declared root MSRV as ANVIL_ROOT_MSRV. Installing
-# and selecting it before setup gives Cargo a deterministic bootstrap without
-# copying workspace member manifests into the narrowed build context. When the
-# repository declares no MSRV, a copied root toolchain file remains responsible
-# for selecting Rust. If neither declaration exists, setup uses current stable
-# as an explicit bootstrap instead of asking cargo-each to inspect manifests
-# that are intentionally absent from the narrowed context.
+# The driver passes the declared root MSRV as ANVIL_ROOT_MSRV. Installing and
+# selecting it before setup preserves the repository toolchain for components
+# and the separate MSRV validation. Cargo tools install with current stable so
+# their source fallbacks are not constrained by an older workspace MSRV.
+# A copied root toolchain file remains responsible for selection when no MSRV
+# is declared. If neither declaration exists, stable is the explicit bootstrap.
 WORKDIR /opt/anvil
 COPY . ./
 ARG ANVIL_ROOT_MSRV
 RUN : "${ANVIL_ROOT_MSRV:?pass --build-arg ANVIL_ROOT_MSRV=<declared-rust-version>}" \
+    && rustup toolchain install stable --profile minimal \
     && setup_toolchain="${ANVIL_ROOT_MSRV}" \
     && if [ "${setup_toolchain}" = "none" ] \
         && [ ! -f rust-toolchain.toml ] \
@@ -339,12 +339,9 @@ RUN : "${ANVIL_ROOT_MSRV:?pass --build-arg ANVIL_ROOT_MSRV=<declared-rust-versio
         rustup toolchain install "${setup_toolchain}" --profile minimal \
         && rustup default "${setup_toolchain}"; \
     fi \
-    && printf "import '.anvil/anvil.just'\n" > Justfile \
-    && if [ "${setup_toolchain}" = "none" ]; then \
-        just anvil-setup binstall; \
-    else \
-        RUSTUP_TOOLCHAIN="${setup_toolchain}" just anvil-setup binstall; \
-    fi \
+    && printf "set unstable\nimport '.anvil/anvil.just'\n" > Justfile \
+    && ANVIL_CARGO_BINSTALL="${CARGO_HOME}/bin/cargo-binstall" \
+        ANVIL_CARGO_INSTALL_TOOLCHAIN=stable just anvil-setup binstall \
     && rm -rf "${CARGO_HOME}/registry/cache" "${CARGO_HOME}/registry/src" \
     && rm -f "${CARGO_HOME}/credentials" "${CARGO_HOME}/credentials.toml" "${HOME:-/root}/.netrc" /root/.netrc \
     && mkdir -p "${CARGO_HOME}/registry" "${CARGO_HOME}/git" \
@@ -1606,7 +1603,7 @@ anvil_impact_skip_prefix := if anvil_impact_mode != "" {
 } else {
     ""
 }
-anvil_impact_config_arg := if path_exists(".delta.toml") { "--config " + quote(absolute_path(".delta.toml")) } else { "" }
+anvil_impact_config_arg := if path_exists(".delta.toml") == "true" { "--config " + quote(absolute_path(".delta.toml")) } else { "" }
 anvil_impact_toolchain := if anvil_impact_mode == "" {
     trim(shell("rustc " + anvil_stable_toolchain_arg + " --print sysroot"))
 } else {
@@ -1655,9 +1652,9 @@ workspace_rust_version_line := if anvil_root_msrv == "" {
 workspace_rust_version := replace(workspace_rust_version_line, "workspace-rust-version=", "")
 
 anvil_stable_toolchain_arg := if env("RUSTUP_TOOLCHAIN", "") == "" {
-    if path_exists(justfile_directory() + "/rust-toolchain.toml") {
+    if path_exists(justfile_directory() + "/rust-toolchain.toml") == "true" {
         ""
-    } else if path_exists(justfile_directory() + "/rust-toolchain") {
+    } else if path_exists(justfile_directory() + "/rust-toolchain") == "true" {
         ""
     } else if workspace_rust_version == "" {
         ""
@@ -1674,7 +1671,7 @@ anvil_msrv_workspace_selection := if workspace_rust_version == "" { "--none" } e
 # Validate downloaded inputs without invoking cargo-delta or recomputing impact.
 [private]
 _anvil-impact-consume-file tier file=(anvil_impact_input_dir + "/" + tier + ".packages"):
-    {{ if anvil_impact_mode != "consume" { "# no downloaded impact input required" } else if path_exists(file) { if read(file) == "" { "# empty impact selection: " + tier } else { "# downloaded impact selection: " + tier } } else { error("anvil-impact: ANVIL_IMPACT=consume requires " + file + "; download a complete impact artifact or correct ANVIL_IMPACT_INPUT_DIR") } }}
+    {{ if anvil_impact_mode != "consume" { "# no downloaded impact input required" } else if path_exists(file) == "true" { if read(file) == "" { "# empty impact selection: " + tier } else { "# downloaded impact selection: " + tier } } else { error("anvil-impact: ANVIL_IMPACT=consume requires " + file + "; download a complete impact artifact or correct ANVIL_IMPACT_INPUT_DIR") } }}
 
 # Used by anvil-scheduled and _anvil-full to fan out all scheduled groups.
 [private]
@@ -1694,7 +1691,7 @@ anvil_bolero_host_target := shell("rustc +" + rust_nightly + " --print host-tupl
 # Used by anvil-bolero to create its JSONL output directory after impact analysis.
 [private]
 _ensure-target-dir: anvil-impact
-    {{ if path_exists("target") { "# target directory already exists" } else { "mkdir target" } }}
+    {{ if path_exists("target") == "true" { "# target directory already exists" } else { "mkdir target" } }}
 
 anvil_careful_prefix := if anvil_impact_mode == "off" {
     ""
@@ -1707,7 +1704,7 @@ anvil_careful_target_dir := if anvil_careful_prefix == "" {
     "target" / "anvil" / "careful" / sha256(
         shell("rustup run " + rust_nightly + " rustc -vV")
         + "\n"
-        + sha256_file(which("cargo-careful"))
+        + sha256_file(require("cargo-careful"))
     )
 } else {
     ""
@@ -1760,9 +1757,9 @@ anvil_cargo_env_config(name, value) := "--config " + quote("env." + name + ".val
 [env("__CARGO_TEMPORARY_BUILD_DIR_NEW_LAYOUT_OPT_OUT", anvil_miri_build_dir_layout_opt_out)]
 [private]
 _anvil-miri-test profile package="" test_filter="" example="": anvil-impact _ensure-target-dir
-    {{ if profile == "standard" || profile == "tree-borrows" || profile == "strict-provenance" || profile == "race-coverage" { "# valid Miri profile" } else { error("anvil miri: unknown profile '" + profile + "'") } }}
-    {{ if test_filter != "" && example != "" { error("anvil-miri: choose exactly one of --test or --example") } else { "# valid test/example selection" } }}
-    {{ if example != "" && package == "" { error("anvil-miri: --example requires --package to avoid workspace ambiguity") } else { "# valid example package selection" } }}
+    {{ if profile == "standard" { "# valid Miri profile" } else if profile == "tree-borrows" { "# valid Miri profile" } else if profile == "strict-provenance" { "# valid Miri profile" } else if profile == "race-coverage" { "# valid Miri profile" } else { error("anvil miri: unknown profile '" + profile + "'") } }}
+    {{ if test_filter == "" { "# valid test/example selection" } else if example == "" { "# valid test/example selection" } else { error("anvil-miri: choose exactly one of --test or --example") } }}
+    {{ if example == "" { "# valid example package selection" } else if package == "" { error("anvil-miri: --example requires --package to avoid workspace ambiguity") } else { "# valid example package selection" } }}
     {{ if example == "" { "# " } else { "" } }}cargo +{{ rust_nightly }} {{ anvil_cargo_env_config("MIRIFLAGS", anvil_miri_flags(profile)) }} {{ anvil_cargo_env_config("RUSTFLAGS", anvil_miri_rustflags(profile)) }} each {{ anvil_miri_selection(package) }} --filter {{ quote("not metadata:anvil.miri.exclude=true") }} --once -- cargo +{{ rust_nightly }} miri run '{packages}' --all-features --locked --example {{ quote(example) }}
     {{ if example != "" { "# " } else { "" } }}cargo +{{ rust_nightly }} {{ anvil_cargo_env_config("MIRIFLAGS", anvil_miri_flags(profile)) }} {{ anvil_cargo_env_config("RUSTFLAGS", anvil_miri_rustflags(profile)) }} each {{ anvil_miri_selection(package) }} --filter {{ quote("not metadata:anvil.miri.exclude=true") }} --once -- cargo +{{ rust_nightly }} miri test '{packages}' --all-features --tests --no-run --locked --message-format=json,json-render-diagnostics > {{ quote(anvil_miri_artifacts_file) }}
     {{ if example != "" { "# " } else { "" } }}cargo +{{ rust_nightly }} {{ anvil_cargo_env_config("MIRIFLAGS", anvil_miri_flags(profile)) }} each --json-lines-file {{ quote(anvil_miri_artifacts_file) }} --json-filter {{ quote("reason=compiler-artifact and profile.test=true and executable") }} --json-work-dir-parent manifest_path --jobs {{ quote(env("ANVIL_MIRI_JOBS", "auto")) }} --keep-going -- rustup run {{ rust_nightly }} cargo-miri runner '{json:executable}' {{ if test_filter == "" { "" } else { quote(test_filter) } }}
@@ -1777,9 +1774,9 @@ anvil_pr_title := env("PR_TITLE", "")
 anvil_pr_title_pattern := '^(?i:feat|fix|chore|docs|refactor|test|build|ci|perf|revert)(?:\([^)]+\))?!?: .+$'
 anvil_pr_title_error := "PR title '" + anvil_pr_title + "' does not match the accepted Conventional Commits subset.\nAllowed patterns: <type>: <description>, <type>(<scope>): <description>, <type>!: <description>, <type>(<scope>)!: <description>\nAllowed types (case-insensitive): feat, fix, chore, docs, refactor, test, build, ci, perf, revert"
 
-anvil_readme_template := if path_exists("crates/README.j2") {
+anvil_readme_template := if path_exists("crates/README.j2") == "true" {
     absolute_path("crates/README.j2")
-} else if path_exists("README.j2") {
+} else if path_exists("README.j2") == "true" {
     absolute_path("README.j2")
 } else {
     ""
@@ -1835,13 +1832,22 @@ _anvil-scheduled-exhaustive: anvil-scheduled-exhaustive-validate-prereqs \
 # Regenerate with cargo-anvil to update this file.
 
 set lazy
-set lists
 
 # Cargo's inventory is captured once, and only when a setup or validation
 # recipe actually references it.
 installed_cargo_tools := `cargo install --list`
 cargo_binstall_version := replace_regex(installed_cargo_tools, '(?ms)\A.*^cargo-binstall v([^:\r\n]+):\r?$.*\z', '$1')
-cargo_binstall_found := if cargo_binstall_version == installed_cargo_tools { "false" } else { "true" }
+cargo_binstall_path := env("ANVIL_CARGO_BINSTALL", "")
+cargo_binstall_found := if cargo_binstall_version != installed_cargo_tools {
+    "true"
+} else if cargo_binstall_path == "" {
+    "false"
+} else if path_exists(cargo_binstall_path) == "true" {
+    "true"
+} else {
+    "false"
+}
+anvil_cargo_install_toolchain := env("ANVIL_CARGO_INSTALL_TOOLCHAIN", env("RUSTUP_TOOLCHAIN", ""))
 bolero_command_prefix := if os() == "linux" { "" } else { "# " }
 anvil_nightly_sysroot := shell("rustup run " + rust_nightly + " rustc --print sysroot")
 anvil_nightly_host := shell("rustup run " + rust_nightly + " rustc --print host-tuple")
@@ -1858,16 +1864,19 @@ anvil-tool-cargo-spellcheck-source-deps-check: anvil-tool-cargo-spellcheck-helpe
 # lets cargo-binstall compile when no binary strategy succeeds; installer mode
 # is caller policy.
 [arg("installer", pattern="^(install|binstall)$")]
+[env("RUSTUP_TOOLCHAIN", anvil_cargo_install_toolchain)]
 [private]
 _install-tool name minimum installer="install" extracted=(replace_regex(installed_cargo_tools, ('(?ms)\A.*^' + name + ' v([^:\r\n]+):\r?$.*\z'), '$1')) found=(if extracted == installed_cargo_tools { "false" } else { "true" }) installed=(if found == "true" { extracted } else { "" }) satisfied=(if found == "true" { semver_matches(installed, ">=" + minimum) } else { "false" }) source_command=("cargo install --locked --version =" + minimum + " " + name) binary_command=("cargo binstall --no-confirm --locked --version =" + minimum + " " + name):
     {{ if satisfied == "true" { "# cargo-binstall not needed" } else if installer == "binstall" { if cargo_binstall_found == "true" { "# cargo-binstall already available" } else { "cargo install --locked cargo-binstall" } } else { "# cargo-binstall not needed" } }}
     {{ if satisfied == "true" { "# " + name + " " + installed + " satisfies >= " + minimum } else if installer == "install" { source_command } else { binary_command } }}
 
+[env("RUSTUP_TOOLCHAIN", anvil_cargo_install_toolchain)]
 [private]
 _install-source-tool name minimum prerequisite extracted=(replace_regex(installed_cargo_tools, ('(?ms)\A.*^' + name + ' v([^:\r\n]+):\r?$.*\z'), '$1')) found=(if extracted == installed_cargo_tools { "false" } else { "true" }) satisfied=(if found == "true" { semver_matches(extracted, ">=" + minimum) } else { "false" }):
     {{ if satisfied == "true" { "# binary install satisfied the requirement" } else { just_executable() + " " + prerequisite } }}
     {{ if satisfied == "true" { "# source fallback not needed" } else { "cargo install --locked --version =" + minimum + " " + name } }}
 
+[env("RUSTUP_TOOLCHAIN", anvil_cargo_install_toolchain)]
 _binstall-with-source-fallback name minimum prerequisite:
     {{ if cargo_binstall_found == "true" { "# cargo-binstall already available" } else { "cargo install --locked cargo-binstall" } }}
     -cargo binstall --no-confirm --locked --disable-strategies compile --version ={{ minimum }} {{ name }}
@@ -1961,7 +1970,7 @@ anvil-component-nightly-rust-src-install: anvil-toolchain-nightly-install (_inst
 [group("anvil-setup")]
 [private]
 anvil-component-nightly-rust-src-validate-prereqs: anvil-toolchain-nightly-validate-prereqs
-    {{ if path_exists(anvil_nightly_rust_src_dir) { "# rust-src component available" } else { error("rust-src is missing from " + rust_nightly + "; run `just anvil-component-nightly-rust-src-install`") } }}
+    {{ if path_exists(anvil_nightly_rust_src_dir) == "true" { "# rust-src component available" } else { error("rust-src is missing from " + rust_nightly + "; run `just anvil-component-nightly-rust-src-install`") } }}
 
 [group("anvil-setup")]
 [private]
@@ -1970,7 +1979,7 @@ anvil-component-nightly-llvm-tools-install: anvil-toolchain-nightly-install (_in
 [group("anvil-setup")]
 [private]
 anvil-component-nightly-llvm-tools-validate-prereqs: anvil-toolchain-nightly-validate-prereqs
-    {{ if path_exists(anvil_nightly_llvm_profdata) { "# llvm-tools component available" } else { error("llvm-tools is missing from " + rust_nightly + "; run `just anvil-component-nightly-llvm-tools-install`") } }}
+    {{ if path_exists(anvil_nightly_llvm_profdata) == "true" { "# llvm-tools component available" } else { error("llvm-tools is missing from " + rust_nightly + "; run `just anvil-component-nightly-llvm-tools-install`") } }}
 
 # Cargo subcommands.
 [group("anvil-setup")]
