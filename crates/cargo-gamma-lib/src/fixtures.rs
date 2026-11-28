@@ -187,7 +187,9 @@ pub(crate) fn commit_git_fixture(root: &camino::Utf8Path, pathspec: &str) -> Str
         assert!(output.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&output.stderr));
         output.stdout
     };
-    git(&["init", "--quiet"]);
+    git(&["init", "--quiet", "--template="]);
+    // Override user hooks in this throwaway repository, including for linked worktrees.
+    git(&["config", "--local", "core.hooksPath", ".git/fixture-hooks"]);
     // Fixture files are written with LF. Linked worktrees must also check them out unchanged.
     git(&["config", "--local", "core.autocrlf", "input"]);
     git(&["add", "--", pathspec]);
